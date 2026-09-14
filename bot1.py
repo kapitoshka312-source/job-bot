@@ -8,6 +8,7 @@ from flask import Flask
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from aiogram.filters import Command
+from aiogram.fsm.core import FSMContext
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
@@ -15,6 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ЗАГЛУШКА")
+SUPERJOB_KEY = os.getenv("SUPERJOB_KEY", "")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -24,7 +26,7 @@ dp.include_router(router)
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "Бот Хабр Карьера работает! 🚀"
+    return "Job Search Bot is running! 🚀"
 
 def run_web_server():
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 7860)))
@@ -38,12 +40,19 @@ HEADERS = {
 
 # ========== СОСТОЯНИЯ (FSM) ==========
 class SearchStates(StatesGroup):
+    waiting_source = State()
     waiting_city = State()
     waiting_custom_city = State()
     waiting_format = State()
     waiting_fresh = State()
 
 # ========== КЛАВИАТУРЫ ==========
+KB_SOURCE = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="🔵 Хабр Карьера", callback_data="src:habr"),
+     InlineKeyboardButton(text="🟢 SuperJob", callback_data="src:sj")],
+    [InlineKeyboardButton(text="🌐 Искать везде", callback_data="src:all")],
+])
+
 KB_CITY = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Любой город", callback_data="city:any"),
      InlineKeyboardButton(text="Москва", callback_data="city:Москва")],
@@ -70,19 +79,16 @@ KB_FRESH = InlineKeyboardMarkup(inline_keyboard=[
 async def search_habr(query: str):
     url = "https://career.habr.com/vacancies"
     params = {"q": query}
-    print(f"🔍 Запрос к Хабр Карьере: {query}")
+    print(f"🔍 Хабр: {query}")
     try:
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(headers=HEADERS, timeout=timeout) as s:
+        async with aiohttp.ClientSession(headers=HEADERS, timeout=aiohttp.ClientTimeout(total=20)) as s:
             async with s.get(url, params=params) as r:
-                print(f"📥 Статус ответа: {r.status}")
                 if r.status != 200:
-                    return [], f"Ошибка Хабр Карьеры: статус {r.status}"
+                    return [], f"Хабр: статус {r.status}"
                 html = await r.text()
 
         soup = BeautifulSoup(html, "html.parser")
         cards = soup.select("div.vacancy-card")
-        print(f"🃏 Найдено карточек: {len(cards)}")
 
         results = []
         for c in cards:
@@ -96,7 +102,6 @@ async def search_habr(query: str):
             comp_tag = c.select_one("div.vacancy-card__company a.link-comp")
             company = comp_tag.get_text(strip=True) if comp_tag else "Не указано"
 
-            # Зарплата
             salary_box = c.select_one("div.vacancy-card__salary")
             salary = "Не указана"
             if salary_box:
@@ -108,7 +113,6 @@ async def search_habr(query: str):
                     if hint:
                         salary = "~ " + hint.get_text(strip=True)
 
-            # Дата публикации
             days_ago = 999
             time_tag = c.select_one("time")
             if time_tag and time_tag.get("datetime"):
@@ -118,7 +122,6 @@ async def search_habr(query: str):
                 except Exception:
                     pass
 
-            # Чипы: город / формат / грейд (по иконкам)
             city = "Не указан"
             work_format = "Не указан"
             grade = ""
@@ -134,14 +137,79 @@ async def search_habr(query: str):
                     grade = txt
 
             results.append({
+                "source": "Хабр",
                 "title": title, "company": company, "salary": salary,
                 "city": city, "work_format": work_format, "grade": grade,
                 "days_ago": days_ago, "url": url_v,
             })
         return results, None
     except Exception as e:
-        print(f"💥 Исключение: {e}")
-        return [], f"Сбой Хабр Карьеры: {e}"
+        return [], f"Сбой Хабра: {e}"
+
+# ========== ПАРСИНГ SUPERJOB ==========
+REMOTE_KEYWORDS = ("удалённ", "удаленн", "remote", "дистанционн")
+
+async def search_superjob(query: str):
+    if not SUPERJOB_KEY:
+        return [], "SuperJob: не задан ключ API"
+    url = "https://api.superjob.ru/2.33/vacancies/"
+    params = {"keyword": query, "count": 50}
+    headers = {"X-Api-App-Id": SUPERJOB_KEY, "User-Agent": "Mozilla/5.0"}
+    print(f"🔍 SuperJob: {query}")
+    try:
+        async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as s:
+            async with s.get(url, params=params) as r:
+                if r.status != 200:
+                    body = await r.text()
+                    return [], f"SuperJob: статус {r.status}"
+                data = await r.json()
+
+        now = datetime.now().timestamp()
+        results = []
+        for v in data.get("objects", []):
+            title = v.get("profession") or "Не указано"
+            company = v.get("firm_name") or (v.get("client", {}) or {}).get("title") or "Не указано"
+
+            p_from = v.get("payment_from") or 0
+            p_to = v.get("payment_to") or 0
+            cur = (v.get("currency") or "rub").upper()
+            if p_from and p_to:
+                salary = f"{p_from} - {p_to} {cur}"
+            elif p_from:
+                salary = f"от {p_from} {cur}"
+            elif p_to:
+                salary = f"до {p_to} {cur}"
+            else:
+                salary = "Не указана"
+
+            city = (v.get("town") or {}).get("title", "Не указан")
+
+            date_pub = v.get("date_published") or 0
+            days_ago = int((now - date_pub) / 86400) if date_pub else 999
+
+            # Определяем формат: по place_of_work и по ключевым словам в описании
+            place = (v.get("place_of_work") or {}).get("title", "").lower()
+            description = (v.get("candidat") or "") + " " + (v.get("vacancyRichText") or "")
+            description = description.lower()
+
+            if "удаленн" in place or "remote" in place or any(k in description for k in REMOTE_KEYWORDS):
+                work_format = "Можно удалённо"
+            elif "офис" in place:
+                work_format = "В офисе"
+            elif "гибрид" in place or "hybrid" in place:
+                work_format = "Гибрид"
+            else:
+                work_format = "Не указан"
+
+            results.append({
+                "source": "SuperJob",
+                "title": title, "company": company, "salary": salary,
+                "city": city, "work_format": work_format, "grade": "",
+                "days_ago": days_ago, "url": v.get("link", ""),
+            })
+        return results, None
+    except Exception as e:
+        return [], f"Сбой SuperJob: {e}"
 
 # ========== ФИЛЬТРЫ ==========
 def apply_filters(items, city, fmt, days):
@@ -149,7 +217,7 @@ def apply_filters(items, city, fmt, days):
     for it in items:
         if city != "any" and city.lower() not in it["city"].lower():
             continue
-        if fmt == "remote" and "удалённо" not in it["work_format"].lower():
+        if fmt == "remote" and "удалённ" not in it["work_format"].lower():
             continue
         if fmt == "office" and "офис" not in it["work_format"].lower():
             continue
@@ -161,6 +229,7 @@ def apply_filters(items, city, fmt, days):
     return out
 
 def human_date(days):
+    if days < 0: return "только что"
     if days == 0: return "сегодня"
     if days == 1: return "вчера"
     if days < 999: return f"{days} дн. назад"
@@ -172,10 +241,12 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         "Привет! 👋\n"
-        "Я бот поиска вакансий на <b>Хабр Карьере</b> с фильтрами.\n\n"
+        "Я бот поиска вакансий с <b>двумя источниками</b>:\n"
+        "🔵 Хабр Карьера\n"
+        "🟢 SuperJob\n\n"
         "Напиши, кого ищешь (например: <code>аналитик</code>),\n"
-        "а дальше я спрошу город, формат и свежесть вакансий.\n\n"
-        "Команда /cancel — сбросить текущий поиск.",
+        "а я задам уточняющие вопросы.\n\n"
+        "Команда /cancel — сброс.",
         parse_mode="HTML"
     )
 
@@ -184,23 +255,28 @@ async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("🔄 Поиск сброшен. Напиши новый запрос.")
 
-# Свой город текстом
 @router.message(SearchStates.waiting_custom_city, F.text)
 async def custom_city(message: Message, state: FSMContext):
     await state.update_data(city=message.text.strip())
     await state.set_state(SearchStates.waiting_format)
     await message.answer("🏢 Формат работы?", reply_markup=KB_FORMAT)
 
-# Главный вход: любой текст = новый запрос
 @router.message(F.text)
 async def start_search(message: Message, state: FSMContext):
     current = await state.get_state()
     if current is not None:
-        return  # мы в середине диалога — текст обрабатывают другие хендлеры
+        return
     await state.clear()
-    await state.update_data(query=message.text.strip(), city="any", fmt="any")
+    await state.update_data(query=message.text.strip(), city="any", fmt="any", source="all")
+    await state.set_state(SearchStates.waiting_source)
+    await message.answer("🌐 Где ищем?", reply_markup=KB_SOURCE)
+
+@router.callback_query(F.data.startswith("src:"))
+async def cb_source(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(source=callback.data.split(":", 1)[1])
     await state.set_state(SearchStates.waiting_city)
-    await message.answer("📍 Выбери город:", reply_markup=KB_CITY)
+    await callback.message.edit_text("📍 Выбери город:", reply_markup=KB_CITY)
+    await callback.answer()
 
 @router.callback_query(F.data.startswith("city:"))
 async def cb_city(callback: CallbackQuery, state: FSMContext):
@@ -219,7 +295,7 @@ async def cb_city(callback: CallbackQuery, state: FSMContext):
 async def cb_format(callback: CallbackQuery, state: FSMContext):
     await state.update_data(fmt=callback.data.split(":", 1)[1])
     await state.set_state(SearchStates.waiting_fresh)
-    await callback.message.edit_text("📅 Насколько свежие вакансии показывать?", reply_markup=KB_FRESH)
+    await callback.message.edit_text("📅 Насколько свежие?", reply_markup=KB_FRESH)
     await callback.answer()
 
 @router.callback_query(F.data.startswith("fresh:"))
@@ -228,42 +304,59 @@ async def cb_fresh(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     await state.clear()
 
-    await callback.message.edit_text("⏳ Ищу вакансии с учётом фильтров...")
+    src = data.get("source", "all")
+    source_label = {"habr": "Хабр Карьера", "sj": "SuperJob", "all": "Хабр + SuperJob"}[src]
+    await callback.message.edit_text(f"⏳ Ищу на <b>{source_label}</b>...", parse_mode="HTML")
     await callback.answer()
 
-    results, error = await search_habr(data.get("query", ""))
-    if error:
-        await callback.message.edit_text(f"❌ {error}")
+    results = []
+    errors = []
+    if src in ("habr", "all"):
+        r, e = await search_habr(data.get("query", ""))
+        results.extend(r)
+        if e: errors.append(e)
+    if src in ("sj", "all"):
+        r, e = await search_superjob(data.get("query", ""))
+        results.extend(r)
+        if e: errors.append(e)
+
+    filtered = apply_filters(results, data.get("city", "any"), data.get("fmt", "any"), days)[:8]
+    print(f"✅ После фильтров: {len(filtered)} из {len(results)}")
+
+    if errors and not filtered:
+        await callback.message.edit_text("❌ " + "\n".join(errors))
         return
-
-    filtered = apply_filters(results, data.get("city", "any"), data.get("fmt", "any"), days)[:6]
-    print(f"✅ После фильтров: {len(filtered)}")
-
     if not filtered:
         await callback.message.edit_text(
             "😕 Ничего не найдено с такими фильтрами.\n"
-            "Попробуй ослабить фильтры (другой город, любая дата)."
+            "Попробуй ослабить фильтры или сменить источник."
         )
         return
 
     await callback.message.edit_text(f"✅ Найдено: {len(filtered)}")
 
     for job in filtered:
-        meta = " • ".join(x for x in [job["grade"], job["work_format"], job["city"]] if x and x != "Не указан")
+        meta = " • ".join(x for x in [job["grade"], job["work_format"], job["city"]] if x and x != "Не указан" and x != "Можно удалённо")
+        if "удалённ" in job["work_format"].lower():
+            meta = ("🏠 Удалённо • " + meta) if meta else "🏠 Удалённо"
+        elif "офис" in job["work_format"].lower():
+            meta = ("🏢 Офис • " + meta) if meta else "🏢 Офис"
+
         text = (
+            f"<i>[{job['source']}]</i>\n"
             f"💼 <b>{job['title']}</b>\n"
             f"🏢 {job['company']}\n"
             f"💰 {job['salary']}\n"
-            f"📅 Опубликовано: {human_date(job['days_ago'])}\n"
+            f"📅 {human_date(job['days_ago'])}\n"
             f"ℹ️ {meta}\n"
         )
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔗 Смотреть на Хабр Карьере", url=job["url"])]
+            [InlineKeyboardButton(text="🔗 Открыть вакансию", url=job["url"])]
         ])
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 async def main():
-    print("✅ Бот Хабр Карьера запущен!")
+    print("✅ Бот запущен!")
     try:
         await dp.start_polling(bot)
     except Exception as e:

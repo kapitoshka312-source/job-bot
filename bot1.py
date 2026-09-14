@@ -18,7 +18,6 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# Мини-сервер (нужен для облачных платформ, чтобы не усыпляли)
 app = Flask(__name__)
 @app.route('/')
 def home():
@@ -37,20 +36,32 @@ HEADERS = {
 async def search_habr(query: str, limit: int = 5):
     url = "https://career.habr.com/vacancies"
     params = {"q": query}
+    print(f"🔍 Запрос к Хабр Карьере: {query}")
     try:
         timeout = aiohttp.ClientTimeout(total=20)
         async with aiohttp.ClientSession(headers=HEADERS, timeout=timeout) as s:
             async with s.get(url, params=params) as r:
+                print(f"📥 Статус ответа: {r.status}")
                 if r.status != 200:
+                    body = await r.text()
+                    print(f"❌ Тело ответа: {body[:300]}")
                     return [], f"Ошибка Хабр Карьеры: статус {r.status}"
                 html = await r.text()
+                print(f"📄 Получено {len(html)} символов HTML")
 
         soup = BeautifulSoup(html, "html.parser")
         cards = soup.select("div.vacancy-card")[:limit]
+        print(f"🃏 Найдено карточек: {len(cards)}")
+
+        if not cards:
+            # Покажем фрагмент HTML, чтобы понять, что там
+            fragment = html[:1500]
+            print("❗ Фрагмент HTML (для диагностики):")
+            print(fragment)
+            return [], "Карточки вакансий не найдены в HTML (возможно, капча или бан)"
 
         results = []
         for c in cards:
-            # Название
             title_tag = c.select_one("div.vacancy-card__title a.vacancy-card__title-link")
             if not title_tag:
                 continue
@@ -58,25 +69,20 @@ async def search_habr(query: str, limit: int = 5):
             href = title_tag.get("href", "")
             url_v = "https://career.habr.com" + href if href.startswith("/") else href
 
-            # Компания
             comp_tag = c.select_one("div.vacancy-card__company a.link-comp")
             company = comp_tag.get_text(strip=True) if comp_tag else "Не указано"
 
-            # Зарплата
             salary_box = c.select_one("div.vacancy-card__salary")
             salary = "Не указана"
             if salary_box:
-                # Реальная зарплата (если есть <b>)
                 real = salary_box.select_one("b") or salary_box.select_one("span.salary")
                 if real:
                     salary = real.get_text(strip=True)
                 else:
-                    # Предсказанная зарплата
                     hint = salary_box.select_one("span.tooltip")
                     if hint:
                         salary = "~ " + hint.get_text(strip=True)
 
-            # Мета-информация: уровень, город, формат
             chips = c.select("div.vacancy-card__meta div.basic-chip")
             meta_parts = []
             for ch in chips:
@@ -94,8 +100,11 @@ async def search_habr(query: str, limit: int = 5):
                 "meta": " • ".join(meta_parts),
                 "url": url_v,
             })
+            print(f"  ✓ {title} | {company}")
+
         return results, None
     except Exception as e:
+        print(f"💥 Исключение: {e}")
         return [], f"Сбой Хабр Карьеры: {e}"
 
 @router.message(Command("start"))

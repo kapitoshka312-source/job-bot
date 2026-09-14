@@ -1,6 +1,8 @@
 import asyncio
 import os
 import aiohttp
+import threading
+from flask import Flask
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import Command
@@ -8,12 +10,25 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8934279737:AAElBwd3DS1dsZFoZx9ZhpzlaHpuu4Ksa7g")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "ЗАГЛУШКА")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
+
+# --- МИНИ-САЙТ, ЧТОБЫ СЕРВЕР НЕ УСЫПЛЯЛ БОТА ---
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Бот работает и ищет вакансии! 🚀"
+
+def run_web_server():
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+
+threading.Thread(target=run_web_server, daemon=True).start()
+# ------------------------------------------------
 
 async def search_hh(query: str, limit: int = 3):
     url = "https://api.hh.ru/vacancies"
@@ -66,37 +81,25 @@ async def handle_search(message: Message):
         return
     
     status_msg = await message.answer("⏳ Ищу вакансии на hh.ru...")
-    
     results, error = await search_hh(query, limit=3)
     
     if error:
-        await status_msg.edit_text(
-            f"❌ Произошла ошибка при поиске:\n\n"
-            f"<code>{error}</code>", 
-            parse_mode="HTML"
-        )
+        await status_msg.edit_text(f"❌ Ошибка:\n<code>{error}</code>", parse_mode="HTML")
         return
     
     if not results:
-        await status_msg.edit_text("😕 Ничего не найдено. Попробуй другой запрос.")
+        await status_msg.edit_text("😕 Ничего не найдено.")
         return
     
-    await status_msg.edit_text(f"✅ Готово! Найдено вакансий: {len(results)}")
+    await status_msg.edit_text(f"✅ Готово! Найдено: {len(results)}")
     
     for job in results:
-        text = (
-            f"💼 <b>{job['title']}</b>\n"
-            f"🏢 {job['company']}\n"
-            f"📍 {job['city']}\n"
-            f"💰 {job['salary']}\n"
-        )
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔗 Смотреть вакансию", url=job["url"])]
-        ])
+        text = f"💼 <b>{job['title']}</b>\n🏢 {job['company']}\n📍 {job['city']}\n💰 {job['salary']}"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 Смотреть", url=job["url"])]])
         await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 async def main():
-    print("✅ Бот запущен...")
+    print("✅ Бот запущен на сервере!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

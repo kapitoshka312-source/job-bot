@@ -150,7 +150,15 @@ async def handle_search(message: Message):
 
 async def main():
     print("✅ Бот Хабр Карьера запущен!")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Ошибка polling: {error_msg}")
+        if "Conflict" in error_msg:
+            print("⚠️ Обнаружен конфликт токенов. Останавливаю бота.")
+            import sys
+            sys.exit(0)
 
 if __name__ == "__main__":
     asyncio.run(main())

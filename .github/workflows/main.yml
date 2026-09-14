@@ -15,12 +15,12 @@ jobs:
     timeout-minutes: 295
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-phyton@v5
         with:
-          python-version: '3.11'
+          phyton-version: '3.11'
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Run habr bot
-        run: python bot1.py
+        run: phyton bot1.py
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}

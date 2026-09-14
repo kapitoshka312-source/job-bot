@@ -8,7 +8,7 @@ from flask import Flask
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from aiogram.filters import Command
-from aiogram.fsm.core import FSMContext
+from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
 

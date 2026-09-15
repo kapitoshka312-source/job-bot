@@ -581,18 +581,23 @@ async def cb_more(callback: CallbackQuery):
     items = cache["items"]
     offset = cache["offset"]
     page = items[offset:offset + PAGE_SIZE]
+
+    # Убираем кнопку со старого сообщения, чтобы она не висела посередине списка
+    await callback.message.edit_reply_markup(reply_markup=None)
+
     for job in page:
         await send_vacancy(chat_id, job)
     offset += len(page)
     cache["offset"] = offset
 
     if offset < len(items):
-        await callback.message.edit_text(
+        await bot.send_message(
+            chat_id,
             f"📄 Показано {offset} из {len(items)}",
             reply_markup=more_keyboard(len(items) - offset)
         )
     else:
-        await callback.message.edit_text(f"✅ Это все вакансии: {len(items)}")
+        await bot.send_message(chat_id, f"✅ Это все вакансии: {len(items)}")
     await callback.answer()
 
 async def main():

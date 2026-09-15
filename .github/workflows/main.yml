@@ -2,7 +2,8 @@ name: Habr Bot
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 */5 * * *'
+    
   workflow_dispatch:
 
 concurrency:
@@ -15,13 +16,13 @@ jobs:
     timeout-minutes: 295
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-phyton@v5
         with:
-          python-version: '3.11'
+          phyton-version: '3.11'
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Run bot
-        run: python bot1.py
+        run: phyton bot1.py
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           SUPERJOB_KEY: ${{ secrets.SUPERJOB_KEY }}

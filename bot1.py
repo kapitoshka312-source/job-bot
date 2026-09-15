@@ -77,6 +77,31 @@ KB_FRESH = InlineKeyboardMarkup(inline_keyboard=[
      InlineKeyboardButton(text="Любая дата", callback_data="fresh:any")],
 ])
 
+# ========== УТИЛИТЫ ДЕДУПЛИКАЦИИ И СОРТИРОВКИ ==========
+def make_key(item):
+    """Создаёт ключ для определения дубликатов."""
+    title = item.get("title", "")
+    title_norm = re.sub(r'\s+', ' ', title.lower().strip())[:40]
+    company = item.get("company", "").lower().strip()[:30]
+    return (title_norm, company)
+
+def deduplicate_and_sort(items):
+    """Убирает дубликаты и сортирует по свежести (сначала новые)."""
+    seen = set()
+    unique = []
+    for item in items:
+        key = make_key(item)
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    
+    # Сортируем по days_ago (возрастание: 0 = сегодня первым)
+    unique.sort(key=lambda x: x.get("days_ago", 999))
+    
+    duplicates_count = len(items) - len(unique)
+    print(f"🧹 Дублей убрано: {duplicates_count}, осталось: {len(unique)}")
+    return unique
+
 # ========== ПАРСИНГ ХАБР КАРЬЕРЫ ==========
 async def search_habr(query: str):
     url = "https://career.habr.com/vacancies"
@@ -290,26 +315,21 @@ async def search_remote_job(query: str):
 
 # ========== ПАРСИНГ HIRIFY ==========
 def parse_hirify_date(date_text: str) -> int:
-    """Парсит даты типа 'обновлено 18 секунд назад', '2 дня назад', '15 сен'"""
     date_text = date_text.lower().strip()
     
-    # "18 секунд назад", "5 минут назад", "2 часа назад"
     if "секунд" in date_text or "минут" in date_text or "час" in date_text:
         return 0
     
-    # "2 дня назад", "5 дней назад"
     match = re.search(r'(\d+)\s*дн', date_text)
     if match:
         return int(match.group(1))
     
-    # "1 неделю назад"
     if "недел" in date_text:
         match = re.search(r'(\d+)', date_text)
         if match:
             return int(match.group(1)) * 7
         return 7
     
-    # "15 сен", "3 авг" — считаем как 0 дней (свежее)
     if re.match(r'\d{1,2}\s+\w{3}', date_text):
         return 0
     
@@ -332,21 +352,17 @@ async def search_hirify(query: str):
 
         results = []
         for c in cards:
-            # Название
             title_tag = c.select_one("h3.title")
             if not title_tag:
                 continue
             title = title_tag.get_text(strip=True)
             
-            # Ссылка
             href = c.get("href", "")
             url_v = "https://hirify.me" + href if href.startswith("/") else href
 
-            # Компания
             company_tag = c.select_one("span.blurred-company")
             company = company_tag.get_text(strip=True) if company_tag else "Скрыта"
 
-            # Теги: формат работы, город
             tags = c.select("div.tag")
             tag_texts = [t.get_text(strip=True).lower() for t in tags]
             
@@ -361,12 +377,10 @@ async def search_hirify(query: str):
                 elif "hybrid" in tag:
                     work_format = "Гибрид"
                 
-                # Города/страны (простая эвристика)
                 if tag not in ["remote", "onsite", "hybrid", "fulltime", "parttime", "contract"]:
                     if any(country in tag for country in ["russia", "uk", "usa", "germany", "spain", "london", "moscow"]):
                         city = tag.title()
 
-            # Дата
             date_div = c.select_one("div.date-full")
             date_text = date_div.get_text(strip=True) if date_div else ""
             days_ago = parse_hirify_date(date_text)
@@ -505,6 +519,9 @@ async def cb_fresh(callback: CallbackQuery, state: FSMContext):
         r, e = await search_hirify(data.get("query", ""))
         results.extend(r)
         if e: errors.append(e)
+
+    # 🆕 ДЕДУПЛИКАЦИЯ И СОРТИРОВКА
+    results = deduplicate_and_sort(results)
 
     filtered = apply_filters(results, data.get("city", "any"), data.get("fmt", "any"), days)[:8]
     print(f"✅ После фильтров: {len(filtered)} из {len(results)}")

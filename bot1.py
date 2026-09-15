@@ -38,6 +38,10 @@ HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9",
 }
 
+PAGE_SIZE = 8       # вакансий за одну порцию
+MAX_RESULTS = 50    # максимум вакансий за один поиск
+SEARCH_CACHE = {}   # хранение результатов для кнопки "ещё"
+
 # ========== СОСТОЯНИЯ (FSM) ==========
 class SearchStates(StatesGroup):
     waiting_source = State()
@@ -77,16 +81,18 @@ KB_FRESH = InlineKeyboardMarkup(inline_keyboard=[
      InlineKeyboardButton(text="Любая дата", callback_data="fresh:any")],
 ])
 
-# ========== УТИЛИТЫ ДЕДУПЛИКАЦИИ И СОРТИРОВКИ ==========
+def more_keyboard(remaining):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"➡️ Показать ещё (осталось {remaining})", callback_data="more")]
+    ])
+
+# ========== УТИЛИТЫ ==========
 def make_key(item):
-    """Создаёт ключ для определения дубликатов."""
-    title = item.get("title", "")
-    title_norm = re.sub(r'\s+', ' ', title.lower().strip())[:40]
+    title_norm = re.sub(r'\s+', ' ', item.get("title", "").lower().strip())[:40]
     company = item.get("company", "").lower().strip()[:30]
     return (title_norm, company)
 
 def deduplicate_and_sort(items):
-    """Убирает дубликаты и сортирует по свежести (сначала новые)."""
     seen = set()
     unique = []
     for item in items:
@@ -94,13 +100,29 @@ def deduplicate_and_sort(items):
         if key not in seen:
             seen.add(key)
             unique.append(item)
-    
-    # Сортируем по days_ago (возрастание: 0 = сегодня первым)
     unique.sort(key=lambda x: x.get("days_ago", 999))
-    
-    duplicates_count = len(items) - len(unique)
-    print(f"🧹 Дублей убрано: {duplicates_count}, осталось: {len(unique)}")
+    print(f"🧹 Дублей убрано: {len(items) - len(unique)}, осталось: {len(unique)}")
     return unique
+
+async def send_vacancy(chat_id, job):
+    meta = " • ".join(x for x in [job["grade"], job["work_format"], job["city"]] if x and x != "Не указан" and x != "Можно удалённо")
+    if "удалённ" in job["work_format"].lower():
+        meta = ("🏠 Удалённо • " + meta) if meta else "🏠 Удалённо"
+    elif "офис" in job["work_format"].lower():
+        meta = ("🏢 Офис • " + meta) if meta else "🏢 Офис"
+
+    text = (
+        f"<i>[{job['source']}]</i>\n"
+        f"💼 <b>{job['title']}</b>\n"
+        f"🏢 {job['company']}\n"
+        f"💰 {job['salary']}\n"
+        f"📅 {human_date(job['days_ago'])}\n"
+        f"ℹ️ {meta}\n"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔗 Открыть вакансию", url=job["url"])]
+    ])
+    await bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
 
 # ========== ПАРСИНГ ХАБР КАРЬЕРЫ ==========
 async def search_habr(query: str):
@@ -278,11 +300,11 @@ async def search_remote_job(query: str):
             h2 = c.select_one("h2")
             if not h2:
                 continue
-            
+
             title_tag = h2.select_one("a")
             if not title_tag:
                 continue
-            
+
             title = " ".join(title_tag.get_text(strip=True).split())
             href = title_tag.get("href", "")
             url_v = "https://remote-job.ru" + href if href.startswith("/") else href
@@ -316,23 +338,18 @@ async def search_remote_job(query: str):
 # ========== ПАРСИНГ HIRIFY ==========
 def parse_hirify_date(date_text: str) -> int:
     date_text = date_text.lower().strip()
-    
     if "секунд" in date_text or "минут" in date_text or "час" in date_text:
         return 0
-    
     match = re.search(r'(\d+)\s*дн', date_text)
     if match:
         return int(match.group(1))
-    
     if "недел" in date_text:
         match = re.search(r'(\d+)', date_text)
         if match:
             return int(match.group(1)) * 7
         return 7
-    
     if re.match(r'\d{1,2}\s+\w{3}', date_text):
         return 0
-    
     return 999
 
 async def search_hirify(query: str):
@@ -356,7 +373,7 @@ async def search_hirify(query: str):
             if not title_tag:
                 continue
             title = title_tag.get_text(strip=True)
-            
+
             href = c.get("href", "")
             url_v = "https://hirify.me" + href if href.startswith("/") else href
 
@@ -365,10 +382,10 @@ async def search_hirify(query: str):
 
             tags = c.select("div.tag")
             tag_texts = [t.get_text(strip=True).lower() for t in tags]
-            
+
             work_format = "Не указан"
             city = "Не указан"
-            
+
             for tag in tag_texts:
                 if "remote" in tag:
                     work_format = "Можно удалённо"
@@ -376,7 +393,7 @@ async def search_hirify(query: str):
                     work_format = "В офисе"
                 elif "hybrid" in tag:
                     work_format = "Гибрид"
-                
+
                 if tag not in ["remote", "onsite", "hybrid", "fulltime", "parttime", "contract"]:
                     if any(country in tag for country in ["russia", "uk", "usa", "germany", "spain", "london", "moscow"]):
                         city = tag.title()
@@ -520,10 +537,9 @@ async def cb_fresh(callback: CallbackQuery, state: FSMContext):
         results.extend(r)
         if e: errors.append(e)
 
-    # 🆕 ДЕДУПЛИКАЦИЯ И СОРТИРОВКА
     results = deduplicate_and_sort(results)
-
-    filtered = apply_filters(results, data.get("city", "any"), data.get("fmt", "any"), days)[:8]
+    filtered = apply_filters(results, data.get("city", "any"), data.get("fmt", "any"), days)
+    filtered = filtered[:MAX_RESULTS]
     print(f"✅ После фильтров: {len(filtered)} из {len(results)}")
 
     if errors and not filtered:
@@ -538,25 +554,46 @@ async def cb_fresh(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.edit_text(f"✅ Найдено: {len(filtered)}")
 
-    for job in filtered:
-        meta = " • ".join(x for x in [job["grade"], job["work_format"], job["city"]] if x and x != "Не указан" and x != "Можно удалённо")
-        if "удалённ" in job["work_format"].lower():
-            meta = ("🏠 Удалённо • " + meta) if meta else "🏠 Удалённо"
-        elif "офис" in job["work_format"].lower():
-            meta = ("🏢 Офис • " + meta) if meta else "🏢 Офис"
+    chat_id = callback.message.chat.id
+    SEARCH_CACHE[chat_id] = {"items": filtered, "offset": 0}
 
-        text = (
-            f"<i>[{job['source']}]</i>\n"
-            f"💼 <b>{job['title']}</b>\n"
-            f"🏢 {job['company']}\n"
-            f"💰 {job['salary']}\n"
-            f"📅 {human_date(job['days_ago'])}\n"
-            f"ℹ️ {meta}\n"
+    page = filtered[:PAGE_SIZE]
+    for job in page:
+        await send_vacancy(chat_id, job)
+    offset = len(page)
+    SEARCH_CACHE[chat_id]["offset"] = offset
+
+    if offset < len(filtered):
+        await bot.send_message(
+            chat_id,
+            f"📄 Показано {offset} из {len(filtered)}",
+            reply_markup=more_keyboard(len(filtered) - offset)
         )
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔗 Открыть вакансию", url=job["url"])]
-        ])
-        await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+@router.callback_query(F.data == "more")
+async def cb_more(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    cache = SEARCH_CACHE.get(chat_id)
+    if not cache or not cache["items"]:
+        await callback.answer("Нечего показывать. Начни новый поиск.", show_alert=True)
+        return
+
+    items = cache["items"]
+    offset = cache["offset"]
+    page = items[offset:offset + PAGE_SIZE]
+    for job in page:
+        await send_vacancy(chat_id, job)
+    offset += len(page)
+    cache["offset"] = offset
+
+    if offset < len(items):
+        await callback.message.edit_text(
+            f"📄 Показано {offset} из {len(items)}",
+            reply_markup=more_keyboard(len(items) - offset)
+        )
+    else:
+        await callback.message.edit_text(f"✅ Это все вакансии: {len(items)}")
+    await callback.answer()
 
 async def main():
     print("✅ Бот запущен!")

@@ -51,7 +51,8 @@ KB_SOURCE = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🔵 Хабр Карьера", callback_data="src:habr"),
      InlineKeyboardButton(text="🟢 SuperJob", callback_data="src:sj")],
     [InlineKeyboardButton(text="🌐 Remote-Job", callback_data="src:remote"),
-     InlineKeyboardButton(text="🌍 Искать везде", callback_data="src:all")],
+     InlineKeyboardButton(text="💼 Hirify", callback_data="src:hirify")],
+    [InlineKeyboardButton(text="🌍 Искать везде", callback_data="src:all")],
 ])
 
 KB_CITY = InlineKeyboardMarkup(inline_keyboard=[
@@ -212,7 +213,6 @@ async def search_superjob(query: str):
 
 # ========== ПАРСИНГ REMOTE-JOB.RU ==========
 def parse_remote_date(date_str: str) -> int:
-    """Парсит дату вида '10 сентября 2026' и возвращает days_ago"""
     date_str = date_str.strip().rstrip(',')
     months = {
         "января": 1, "февраля": 2, "марта": 3, "апреля": 4,
@@ -258,17 +258,14 @@ async def search_remote_job(query: str):
             if not title_tag:
                 continue
             
-            # Название (убираем выделение <span> и лишние пробелы)
             title = " ".join(title_tag.get_text(strip=True).split())
             href = title_tag.get("href", "")
             url_v = "https://remote-job.ru" + href if href.startswith("/") else href
 
-            # Дата
             date_small = h2.select_one("small")
             date_str = date_small.get_text(strip=True) if date_small else ""
             days_ago = parse_remote_date(date_str)
 
-            # Компания
             company = "Не указано"
             company_small = h2.select("small")
             if len(company_small) > 1:
@@ -276,11 +273,9 @@ async def search_remote_job(query: str):
                 if company_a:
                     company = company_a.get_text(strip=True)
 
-            # Зарплата
             h3 = c.select_one("h3")
             salary = h3.get_text(strip=True) if h3 else "Не указана"
 
-            # Формат: проверяем наличие "удаленн" в заголовке
             work_format = "Можно удалённо" if "удаленн" in title.lower() else "Не указан"
 
             results.append({
@@ -292,6 +287,99 @@ async def search_remote_job(query: str):
         return results, None
     except Exception as e:
         return [], f"Сбой Remote-Job: {e}"
+
+# ========== ПАРСИНГ HIRIFY ==========
+def parse_hirify_date(date_text: str) -> int:
+    """Парсит даты типа 'обновлено 18 секунд назад', '2 дня назад', '15 сен'"""
+    date_text = date_text.lower().strip()
+    
+    # "18 секунд назад", "5 минут назад", "2 часа назад"
+    if "секунд" in date_text or "минут" in date_text or "час" in date_text:
+        return 0
+    
+    # "2 дня назад", "5 дней назад"
+    match = re.search(r'(\d+)\s*дн', date_text)
+    if match:
+        return int(match.group(1))
+    
+    # "1 неделю назад"
+    if "недел" in date_text:
+        match = re.search(r'(\d+)', date_text)
+        if match:
+            return int(match.group(1)) * 7
+        return 7
+    
+    # "15 сен", "3 авг" — считаем как 0 дней (свежее)
+    if re.match(r'\d{1,2}\s+\w{3}', date_text):
+        return 0
+    
+    return 999
+
+async def search_hirify(query: str):
+    url = "https://hirify.me/"
+    params = {"params": "title,company", "search": query}
+    print(f"🔍 Hirify: {query}")
+    try:
+        async with aiohttp.ClientSession(headers=HEADERS, timeout=aiohttp.ClientTimeout(total=20)) as s:
+            async with s.get(url, params=params) as r:
+                if r.status != 200:
+                    return [], f"Hirify: статус {r.status}"
+                html = await r.text()
+
+        soup = BeautifulSoup(html, "html.parser")
+        cards = soup.select("a.vacancy-card-link")
+        print(f"🃏 Hirify карточек: {len(cards)}")
+
+        results = []
+        for c in cards:
+            # Название
+            title_tag = c.select_one("h3.title")
+            if not title_tag:
+                continue
+            title = title_tag.get_text(strip=True)
+            
+            # Ссылка
+            href = c.get("href", "")
+            url_v = "https://hirify.me" + href if href.startswith("/") else href
+
+            # Компания
+            company_tag = c.select_one("span.blurred-company")
+            company = company_tag.get_text(strip=True) if company_tag else "Скрыта"
+
+            # Теги: формат работы, город
+            tags = c.select("div.tag")
+            tag_texts = [t.get_text(strip=True).lower() for t in tags]
+            
+            work_format = "Не указан"
+            city = "Не указан"
+            
+            for tag in tag_texts:
+                if "remote" in tag:
+                    work_format = "Можно удалённо"
+                elif "onsite" in tag:
+                    work_format = "В офисе"
+                elif "hybrid" in tag:
+                    work_format = "Гибрид"
+                
+                # Города/страны (простая эвристика)
+                if tag not in ["remote", "onsite", "hybrid", "fulltime", "parttime", "contract"]:
+                    if any(country in tag for country in ["russia", "uk", "usa", "germany", "spain", "london", "moscow"]):
+                        city = tag.title()
+
+            # Дата
+            date_div = c.select_one("div.date-full")
+            date_text = date_div.get_text(strip=True) if date_div else ""
+            days_ago = parse_hirify_date(date_text)
+
+            results.append({
+                "source": "Hirify",
+                "title": title, "company": company, "salary": "Не указана",
+                "city": city, "work_format": work_format, "grade": "",
+                "days_ago": days_ago, "url": url_v,
+            })
+        return results, None
+    except Exception as e:
+        return [], f"Сбой Hirify: {e}"
 
 # ========== ФИЛЬТРЫ ==========
 def apply_filters(items, city, fmt, days):
@@ -323,10 +411,11 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         "Привет! 👋\n"
-        "Я бот поиска вакансий с <b>тремя источниками</b>:\n"
+        "Я бот поиска вакансий с <b>четырьмя источниками</b>:\n"
         "🔵 Хабр Карьера\n"
         "🟢 SuperJob\n"
-        "🌐 Remote-Job (удалёнка)\n\n"
+        "🌐 Remote-Job (удалёнка)\n"
+        "💼 Hirify (международные)\n\n"
         "Напиши, кого ищешь (например: <code>аналитик</code>),\n"
         "а я задам уточняющие вопросы.\n\n"
         "Команда /cancel — сброс.",
@@ -392,6 +481,7 @@ async def cb_fresh(callback: CallbackQuery, state: FSMContext):
         "habr": "Хабр Карьера",
         "sj": "SuperJob",
         "remote": "Remote-Job",
+        "hirify": "Hirify",
         "all": "Все источники"
     }[src]
     await callback.message.edit_text(f"⏳ Ищу на <b>{source_label}</b>...", parse_mode="HTML")
@@ -409,6 +499,10 @@ async def cb_fresh(callback: CallbackQuery, state: FSMContext):
         if e: errors.append(e)
     if src in ("remote", "all"):
         r, e = await search_remote_job(data.get("query", ""))
+        results.extend(r)
+        if e: errors.append(e)
+    if src in ("hirify", "all"):
+        r, e = await search_hirify(data.get("query", ""))
         results.extend(r)
         if e: errors.append(e)
 

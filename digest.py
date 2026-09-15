@@ -20,7 +20,7 @@ SCHEDULE = {
 }
 
 CHAT_ID = os.getenv("CHAT_ID", "")
-MAX_PER_DIGEST = 20  # максимум вакансий в одной рассылке
+MAX_PER_DIGEST = 30  # максимум вакансий в одной рассылке
 
 async def main():
     if not CHAT_ID:

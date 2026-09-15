@@ -11,6 +11,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
+import re
 
 load_dotenv()
 
@@ -49,7 +50,8 @@ class SearchStates(StatesGroup):
 KB_SOURCE = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🔵 Хабр Карьера", callback_data="src:habr"),
      InlineKeyboardButton(text="🟢 SuperJob", callback_data="src:sj")],
-    [InlineKeyboardButton(text="🌐 Искать везде", callback_data="src:all")],
+    [InlineKeyboardButton(text="🌐 Remote-Job", callback_data="src:remote"),
+     InlineKeyboardButton(text="🌍 Искать везде", callback_data="src:all")],
 ])
 
 KB_CITY = InlineKeyboardMarkup(inline_keyboard=[
@@ -159,7 +161,6 @@ async def search_superjob(query: str):
         async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as s:
             async with s.get(url, params=params) as r:
                 if r.status != 200:
-                    body = await r.text()
                     return [], f"SuperJob: статус {r.status}"
                 data = await r.json()
 
@@ -186,7 +187,6 @@ async def search_superjob(query: str):
             date_pub = v.get("date_published") or 0
             days_ago = int((now - date_pub) / 86400) if date_pub else 999
 
-            # Определяем формат: по place_of_work и по ключевым словам в описании
             place = (v.get("place_of_work") or {}).get("title", "").lower()
             description = (v.get("candidat") or "") + " " + (v.get("vacancyRichText") or "")
             description = description.lower()
@@ -209,6 +209,89 @@ async def search_superjob(query: str):
         return results, None
     except Exception as e:
         return [], f"Сбой SuperJob: {e}"
+
+# ========== ПАРСИНГ REMOTE-JOB.RU ==========
+def parse_remote_date(date_str: str) -> int:
+    """Парсит дату вида '10 сентября 2026' и возвращает days_ago"""
+    date_str = date_str.strip().rstrip(',')
+    months = {
+        "января": 1, "февраля": 2, "марта": 3, "апреля": 4,
+        "мая": 5, "июня": 6, "июля": 7, "августа": 8,
+        "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12
+    }
+    try:
+        parts = date_str.split()
+        if len(parts) < 3:
+            return 999
+        day = int(parts[0])
+        month = months.get(parts[1].lower(), 0)
+        year = int(parts[2])
+        if month == 0:
+            return 999
+        dt = datetime(year, month, day)
+        return (datetime.now() - dt).days
+    except Exception:
+        return 999
+
+async def search_remote_job(query: str):
+    url = "https://remote-job.ru/search"
+    params = {"search[query]": query, "search[searchType]": "vacancy"}
+    print(f"🔍 Remote-Job: {query}")
+    try:
+        async with aiohttp.ClientSession(headers=HEADERS, timeout=aiohttp.ClientTimeout(total=20)) as s:
+            async with s.get(url, params=params) as r:
+                if r.status != 200:
+                    return [], f"Remote-Job: статус {r.status}"
+                html = await r.text()
+
+        soup = BeautifulSoup(html, "html.parser")
+        cards = soup.select("div.vacancy_item")
+        print(f"🃏 Remote-Job карточек: {len(cards)}")
+
+        results = []
+        for c in cards:
+            h2 = c.select_one("h2")
+            if not h2:
+                continue
+            
+            title_tag = h2.select_one("a")
+            if not title_tag:
+                continue
+            
+            # Название (убираем выделение <span> и лишние пробелы)
+            title = " ".join(title_tag.get_text(strip=True).split())
+            href = title_tag.get("href", "")
+            url_v = "https://remote-job.ru" + href if href.startswith("/") else href
+
+            # Дата
+            date_small = h2.select_one("small")
+            date_str = date_small.get_text(strip=True) if date_small else ""
+            days_ago = parse_remote_date(date_str)
+
+            # Компания
+            company = "Не указано"
+            company_small = h2.select("small")
+            if len(company_small) > 1:
+                company_a = company_small[1].select_one("a")
+                if company_a:
+                    company = company_a.get_text(strip=True)
+
+            # Зарплата
+            h3 = c.select_one("h3")
+            salary = h3.get_text(strip=True) if h3 else "Не указана"
+
+            # Формат: проверяем наличие "удаленн" в заголовке
+            work_format = "Можно удалённо" if "удаленн" in title.lower() else "Не указан"
+
+            results.append({
+                "source": "Remote-Job",
+                "title": title, "company": company, "salary": salary,
+                "city": "Удалённо", "work_format": work_format, "grade": "",
+                "days_ago": days_ago, "url": url_v,
+            })
+        return results, None
+    except Exception as e:
+        return [], f"Сбой Remote-Job: {e}"
 
 # ========== ФИЛЬТРЫ ==========
 def apply_filters(items, city, fmt, days):
@@ -240,9 +323,10 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         "Привет! 👋\n"
-        "Я бот поиска вакансий с <b>двумя источниками</b>:\n"
+        "Я бот поиска вакансий с <b>тремя источниками</b>:\n"
         "🔵 Хабр Карьера\n"
-        "🟢 SuperJob\n\n"
+        "🟢 SuperJob\n"
+        "🌐 Remote-Job (удалёнка)\n\n"
         "Напиши, кого ищешь (например: <code>аналитик</code>),\n"
         "а я задам уточняющие вопросы.\n\n"
         "Команда /cancel — сброс.",
@@ -304,7 +388,12 @@ async def cb_fresh(callback: CallbackQuery, state: FSMContext):
     await state.clear()
 
     src = data.get("source", "all")
-    source_label = {"habr": "Хабр Карьера", "sj": "SuperJob", "all": "Хабр + SuperJob"}[src]
+    source_label = {
+        "habr": "Хабр Карьера",
+        "sj": "SuperJob",
+        "remote": "Remote-Job",
+        "all": "Все источники"
+    }[src]
     await callback.message.edit_text(f"⏳ Ищу на <b>{source_label}</b>...", parse_mode="HTML")
     await callback.answer()
 
@@ -316,6 +405,10 @@ async def cb_fresh(callback: CallbackQuery, state: FSMContext):
         if e: errors.append(e)
     if src in ("sj", "all"):
         r, e = await search_superjob(data.get("query", ""))
+        results.extend(r)
+        if e: errors.append(e)
+    if src in ("remote", "all"):
+        r, e = await search_remote_job(data.get("query", ""))
         results.extend(r)
         if e: errors.append(e)
 

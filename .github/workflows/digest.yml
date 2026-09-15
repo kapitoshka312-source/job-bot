@@ -1,0 +1,36 @@
+name: Digest
+
+on:
+  schedule:
+    - cron: '0 7 * * *'
+    - cron: '0 8 * * *'
+    - cron: '0 9 * * *'
+    - cron: '0 11 * * *'
+    - cron: '0 12 * * *'
+    - cron: '0 13 * * *'
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+    inputs:
+      test_hour:
+        description: 'Тестовый час МСК (10,11,12,14,15,16,17). Пусто = текущее время'
+        required: false
+        default: ''
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run digest
+        run: python digest.py
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          SUPERJOB_KEY: ${{ secrets.SUPERJOB_KEY }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          TEST_HOUR: ${{ github.event.inputs.test_hour }}

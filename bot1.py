@@ -38,9 +38,9 @@ HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9",
 }
 
-PAGE_SIZE = 8       # вакансий за одну порцию
-MAX_RESULTS = 50    # максимум вакансий за один поиск
-SEARCH_CACHE = {}   # хранение результатов для кнопки "ещё"
+PAGE_SIZE = 8
+MAX_RESULTS = 50
+SEARCH_CACHE = {}
 
 # ========== СОСТОЯНИЯ (FSM) ==========
 class SearchStates(StatesGroup):
@@ -49,6 +49,7 @@ class SearchStates(StatesGroup):
     waiting_custom_city = State()
     waiting_format = State()
     waiting_fresh = State()
+    waiting_relev = State()
 
 # ========== КЛАВИАТУРЫ ==========
 KB_SOURCE = InlineKeyboardMarkup(inline_keyboard=[
@@ -64,6 +65,7 @@ KB_CITY = InlineKeyboardMarkup(inline_keyboard=[
      InlineKeyboardButton(text="Москва", callback_data="city:Москва")],
     [InlineKeyboardButton(text="Санкт-Петербург", callback_data="city:Санкт-Петербург"),
      InlineKeyboardButton(text="Свой город ✏️", callback_data="city:custom")],
+    [InlineKeyboardButton(text="🎯 СПб + удалёнка (приоритеты)", callback_data="city:personal")],
 ])
 
 KB_FORMAT = InlineKeyboardMarkup(inline_keyboard=[
@@ -79,6 +81,12 @@ KB_FRESH = InlineKeyboardMarkup(inline_keyboard=[
      InlineKeyboardButton(text="Неделя", callback_data="fresh:7")],
     [InlineKeyboardButton(text="Месяц", callback_data="fresh:30"),
      InlineKeyboardButton(text="Любая дата", callback_data="fresh:any")],
+])
+
+KB_RELEV = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="⚖️ По релевантности", callback_data="rel:rank"),
+     InlineKeyboardButton(text="🎯 Только совпадения в названии", callback_data="rel:strict")],
+    [InlineKeyboardButton(text="📅 Только по дате", callback_data="rel:date")],
 ])
 
 def more_keyboard(remaining):
@@ -104,8 +112,41 @@ def deduplicate_and_sort(items):
     print(f"🧹 Дублей убрано: {len(items) - len(unique)}, осталось: {len(unique)}")
     return unique
 
+def _word_match(word, title):
+    if word in title:
+        return True
+    stem = word[:5] if len(word) > 5 else word
+    return stem in title
+
+def relevance_score(job, query):
+    title = job.get("title", "").lower()
+    q = query.lower().strip()
+    if not q:
+        return 0
+    if q in title:
+        return 100
+    words = [w for w in re.split(r'[\s,/+-]+', q) if len(w) > 2]
+    if not words:
+        words = [q]
+    hits = sum(1 for w in words if _word_match(w, title))
+    if hits == len(words):
+        return 80
+    if hits > 0:
+        return 60
+    return 0
+
+def personal_priority(job):
+    """Личные приоритеты: 1 = СПб (любой формат), 2 = удалёнка (любой город), 0 = не показывать."""
+    city = job.get("city", "").lower()
+    fmt = job.get("work_format", "").lower()
+    if "петербург" in city:
+        return 1
+    if "удалённ" in fmt:
+        return 2
+    return 0
+
 async def send_vacancy(chat_id, job):
-    meta = " • ".join(x for x in [job["grade"], job["work_format"], job["city"]] if x and x != "Не указан" and x != "Можно удалённо")
+    meta = " • ".join(x for x in [job["grade"], job["work_format"], job["city"]] if x and x not in ("Не указан", "Можно удалённо", "Удалённо"))
     if "удалённ" in job["work_format"].lower():
         meta = ("🏠 Удалённо • " + meta) if meta else "🏠 Удалённо"
     elif "офис" in job["work_format"].lower():
@@ -323,7 +364,8 @@ async def search_remote_job(query: str):
             h3 = c.select_one("h3")
             salary = h3.get_text(strip=True) if h3 else "Не указана"
 
-            work_format = "Можно удалённо" if "удаленн" in title.lower() else "Не указан"
+            # remote-job.ru — сайт полностью удалённых вакансий
+            work_format = "Можно удалённо"
 
             results.append({
                 "source": "Remote-Job",
@@ -436,6 +478,82 @@ def human_date(days):
     if days < 999: return f"{days} дн. назад"
     return "дата неизвестна"
 
+# ========== ОБЩИЙ ЗАПУСК ПОИСКА ==========
+async def run_search(callback, data, relev):
+    query = data.get("query", "")
+    src = data.get("source", "all")
+    source_label = {
+        "habr": "Хабр Карьера",
+        "sj": "SuperJob",
+        "remote": "Remote-Job",
+        "hirify": "Hirify",
+        "all": "Все источники"
+    }[src]
+    await callback.message.edit_text(f"⏳ Ищу на <b>{source_label}</b>...", parse_mode="HTML")
+
+    results = []
+    errors = []
+    if src in ("habr", "all"):
+        r, e = await search_habr(query)
+        results.extend(r)
+        if e: errors.append(e)
+    if src in ("sj", "all"):
+        r, e = await search_superjob(query)
+        results.extend(r)
+        if e: errors.append(e)
+    if src in ("remote", "all"):
+        r, e = await search_remote_job(query)
+        results.extend(r)
+        if e: errors.append(e)
+    if src in ("hirify", "all"):
+        r, e = await search_hirify(query)
+        results.extend(r)
+        if e: errors.append(e)
+
+    results = deduplicate_and_sort(results)
+    filtered = apply_filters(results, data.get("city", "any"), data.get("fmt", "any"), data.get("days", "any"))
+
+    if data.get("priority") == "personal":
+        # Личные приоритеты: 1) СПб любой формат, 2) удалёнка любой город, остальное отбрасываем
+        filtered = [v for v in filtered if personal_priority(v) > 0]
+        filtered.sort(key=lambda v: (personal_priority(v), v.get("days_ago", 999), -relevance_score(v, query)))
+    else:
+        if relev == "strict":
+            filtered = [v for v in filtered if relevance_score(v, query) >= 60]
+        if relev in ("rank", "strict"):
+            filtered.sort(key=lambda v: (-relevance_score(v, query), v.get("days_ago", 999)))
+
+    filtered = filtered[:MAX_RESULTS]
+    print(f"✅ После фильтров и приоритетов: {len(filtered)} из {len(results)}")
+
+    if errors and not filtered:
+        await callback.message.edit_text("❌ " + "\n".join(errors))
+        return
+    if not filtered:
+        await callback.message.edit_text(
+            "😕 Ничего не найдено с такими фильтрами.\n"
+            "Попробуй ослабить фильтры или сменить источник."
+        )
+        return
+
+    await callback.message.edit_text(f"✅ Найдено: {len(filtered)}")
+
+    chat_id = callback.message.chat.id
+    SEARCH_CACHE[chat_id] = {"items": filtered, "offset": 0}
+
+    page = filtered[:PAGE_SIZE]
+    for job in page:
+        await send_vacancy(chat_id, job)
+    offset = len(page)
+    SEARCH_CACHE[chat_id]["offset"] = offset
+
+    if offset < len(filtered):
+        await bot.send_message(
+            chat_id,
+            f"📄 Показано {offset} из {len(filtered)}",
+            reply_markup=more_keyboard(len(filtered) - offset)
+        )
+
 # ========== ХЕНДЛЕРЫ ==========
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
@@ -448,7 +566,8 @@ async def cmd_start(message: Message, state: FSMContext):
         "🌐 Remote-Job (удалёнка)\n"
         "💼 Hirify (международные)\n\n"
         "Напиши, кого ищешь (например: <code>аналитик</code>),\n"
-        "а я задам уточняющие вопросы.\n\n"
+        "а я задам уточняющие вопросы.\n"
+        "Кнопка 🎯 в шаге города — приоритеты: СПб + удалёнка.\n\n"
         "Команда /cancel — сброс.",
         parse_mode="HTML"
     )
@@ -489,7 +608,13 @@ async def cb_city(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text("✏️ Напиши свой город:")
         await callback.answer()
         return
-    await state.update_data(city=value)
+    if value == "personal":
+        await state.update_data(city="any", fmt="any", priority="personal")
+        await state.set_state(SearchStates.waiting_fresh)
+        await callback.message.edit_text("📅 Насколько свежие? (приоритеты: СПб → удалёнка)", reply_markup=KB_FRESH)
+        await callback.answer()
+        return
+    await state.update_data(city=value, priority="")
     await state.set_state(SearchStates.waiting_format)
     await callback.message.edit_text("🏢 Формат работы?", reply_markup=KB_FORMAT)
     await callback.answer()
@@ -503,72 +628,22 @@ async def cb_format(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("fresh:"))
 async def cb_fresh(callback: CallbackQuery, state: FSMContext):
-    days = callback.data.split(":", 1)[1]
+    await state.update_data(days=callback.data.split(":", 1)[1])
     data = await state.get_data()
-    await state.clear()
-
-    src = data.get("source", "all")
-    source_label = {
-        "habr": "Хабр Карьера",
-        "sj": "SuperJob",
-        "remote": "Remote-Job",
-        "hirify": "Hirify",
-        "all": "Все источники"
-    }[src]
-    await callback.message.edit_text(f"⏳ Ищу на <b>{source_label}</b>...", parse_mode="HTML")
+    if data.get("priority") == "personal":
+        await state.clear()
+        await run_search(callback, data, "rank")
+    else:
+        await state.set_state(SearchStates.waiting_relev)
+        await callback.message.edit_text("🎯 Как учитывать релевантность?", reply_markup=KB_RELEV)
     await callback.answer()
 
-    results = []
-    errors = []
-    if src in ("habr", "all"):
-        r, e = await search_habr(data.get("query", ""))
-        results.extend(r)
-        if e: errors.append(e)
-    if src in ("sj", "all"):
-        r, e = await search_superjob(data.get("query", ""))
-        results.extend(r)
-        if e: errors.append(e)
-    if src in ("remote", "all"):
-        r, e = await search_remote_job(data.get("query", ""))
-        results.extend(r)
-        if e: errors.append(e)
-    if src in ("hirify", "all"):
-        r, e = await search_hirify(data.get("query", ""))
-        results.extend(r)
-        if e: errors.append(e)
-
-    results = deduplicate_and_sort(results)
-    filtered = apply_filters(results, data.get("city", "any"), data.get("fmt", "any"), days)
-    filtered = filtered[:MAX_RESULTS]
-    print(f"✅ После фильтров: {len(filtered)} из {len(results)}")
-
-    if errors and not filtered:
-        await callback.message.edit_text("❌ " + "\n".join(errors))
-        return
-    if not filtered:
-        await callback.message.edit_text(
-            "😕 Ничего не найдено с такими фильтрами.\n"
-            "Попробуй ослабить фильтры или сменить источник."
-        )
-        return
-
-    await callback.message.edit_text(f"✅ Найдено: {len(filtered)}")
-
-    chat_id = callback.message.chat.id
-    SEARCH_CACHE[chat_id] = {"items": filtered, "offset": 0}
-
-    page = filtered[:PAGE_SIZE]
-    for job in page:
-        await send_vacancy(chat_id, job)
-    offset = len(page)
-    SEARCH_CACHE[chat_id]["offset"] = offset
-
-    if offset < len(filtered):
-        await bot.send_message(
-            chat_id,
-            f"📄 Показано {offset} из {len(filtered)}",
-            reply_markup=more_keyboard(len(filtered) - offset)
-        )
+@router.callback_query(F.data.startswith("rel:"))
+async def cb_relev(callback: CallbackQuery, state: FSMContext):
+    relev = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    await state.clear()
+    await run_search(callback, data, relev)
 
 @router.callback_query(F.data == "more")
 async def cb_more(callback: CallbackQuery):
@@ -582,7 +657,6 @@ async def cb_more(callback: CallbackQuery):
     offset = cache["offset"]
     page = items[offset:offset + PAGE_SIZE]
 
-    # Убираем кнопку со старого сообщения, чтобы она не висела посередине списка
     await callback.message.edit_reply_markup(reply_markup=None)
 
     for job in page:

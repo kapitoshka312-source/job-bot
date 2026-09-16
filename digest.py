@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 from bot1 import (
     bot,
     search_habr, search_superjob, search_remote_job, search_hirify,
-    deduplicate_and_sort, send_vacancy,
+    deduplicate_and_sort, send_vacancy, relevance_score, personal_priority,
 )
 
 # Расписание рассылок (время МОСКОВСКОЕ): час -> запрос
@@ -20,7 +20,7 @@ SCHEDULE = {
 }
 
 CHAT_ID = os.getenv("CHAT_ID", "")
-MAX_PER_DIGEST = 30  # максимум вакансий в одной рассылке
+MAX_PER_DIGEST = 30
 
 async def main():
     if not CHAT_ID:
@@ -40,7 +40,7 @@ async def main():
     print(f"📨 Дайджест {hour}:00 МСК | запрос: «{query}»")
     await bot.send_message(
         chat_id,
-        f"⏰ Дайджест {hour}:00 МСК\n🔍 Запрос: «{query}»\n📅 Вакансии за последние 24 часа, все источники"
+        f"⏰ Дайджест {hour}:00 МСК\n🔍 Запрос: «{query}»\n📅 Свежесть: 24 часа\n🎯 Приоритет: 1) Санкт-Петербург  2) удалёнка"
     )
 
     results = []
@@ -51,11 +51,16 @@ async def main():
         results.extend(r)
 
     results = deduplicate_and_sort(results)
+
+    # Свежесть: не старше 24 часов
     fresh = [v for v in results if v.get("days_ago", 999) <= 1]
-    print(f"📊 Всего: {len(results)}, свежих (<=24ч): {len(fresh)}")
+    # Личные приоритеты: 1) СПб (любой формат), 2) удалёнка (любой город), остальное отбрасываем
+    fresh = [v for v in fresh if personal_priority(v) > 0]
+    fresh.sort(key=lambda v: (personal_priority(v), v.get("days_ago", 999), -relevance_score(v, query)))
+    print(f"📊 Всего: {len(results)}, свежих и по приоритетам: {len(fresh)}")
 
     if not fresh:
-        await bot.send_message(chat_id, "😴 За последние 24 часа новых вакансий не появилось.")
+        await bot.send_message(chat_id, "😴 За последние 24 часа новых вакансий по приоритетам (СПб / удалёнка) не появилось.")
         return
 
     for job in fresh[:MAX_PER_DIGEST]:

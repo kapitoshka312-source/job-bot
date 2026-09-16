@@ -45,7 +45,9 @@ def make_key(title, company):
 # ========== ПАРСИНГ GORODRABOT ==========
 async def search_gorodrabot(query: str):
     """Парсит ГородРабот для Санкт-Петербурга."""
-    url = f"https://sankt-peterburg.gorodrabot.ru/{query.replace(' ', '_')}"
+    from urllib.parse import quote
+    encoded_query = quote(query.replace(' ', '_'))
+    url = f"https://sankt-peterburg.gorodrabot.ru/{encoded_query}"
     print(f"🔍 ГородРабот: {query}")
     
     all_vacancies = []

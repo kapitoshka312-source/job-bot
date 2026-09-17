@@ -21,37 +21,45 @@ HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9",
 }
 
-# Telegram-каналы для парсинга
+# Telegram-каналы для парсинга (bpmn2ru убран: вебинары, не заказы)
 TG_CHANNELS = [
-    "bpmn2ru",           # BPM, бизнес-процессы
     "analyst_job",       # Работа для системных и бизнес-аналитиков
     "ba_and_sa",         # Бизнес и системные аналитики
     "ipomogator",        # Биржа фриланса
     "distantsiya",       # Удалённая работа и фриланс
 ]
 
-# Ключевые слова для фильтрации
+# Профессиональные ключевые слова
 KEYWORDS = [
     "аналитик", "bpmn", "бизнес-процесс", "смк", "качеств",
-    "методолог", "подработк", "разов", "проект", "фриланс",
-    "регламент", "процесс", "требован", "документаци"
+    "методолог", "регламент", "требован", "документаци", "процесс"
 ]
 
+# Маркеры того, что пост — это заказ/вакансия, а не статья
+ORDER_MARKERS = [
+    "ищем", "ищу", "требуется", "нужен", "ваканс", "заказ",
+    "гонорар", "оплат", "подработ", "разов", "фриланс",
+    "проектн", "стажиров", "найм", "возьмусь", "готов выполнить"
+]
+
+# Запросы для freelance.ru
+FREELANCE_QUERIES = ["аналитик", "бизнес-процесс", "методолог"]
+
 MAX_RESULTS = 50
-FRESH_HOURS = 24    # окно свежести в часах (можно поднять до 72, если каналы постят редко)
+FRESH_HOURS = 24
 
 # ========== УТИЛИТЫ ==========
 def parse_age_hours(text):
     """Парсит возраст из текста типа '44 минуты назад', '5 часов назад', 'день назад'."""
     text = text.lower()
-    if "сегодня" in text or "минут" in text:
+    if "сегодня" in text or "только что" in text or "минут" in text:
         return 0
     match = re.search(r'(\d+)\s*час', text)
     if match:
         return int(match.group(1))
-    if "день назад" in text or "дня назад" in text:
-        return 24
-    if "вчера" in text:
+    if re.search(r'(час|часа)\s+назад', text):
+        return 1
+    if "день назад" in text or "дня назад" in text or "вчера" in text:
         return 24
     return 999
 
@@ -74,10 +82,12 @@ def make_key(title, source):
     title_norm = re.sub(r'\s+', ' ', title.lower().strip())[:50]
     return (title_norm, source)
 
-def matches_keywords(text):
-    """Проверяет, есть ли ключевые слова в тексте."""
-    text_lower = text.lower()
-    return any(kw in text_lower for kw in KEYWORDS)
+def is_order_post(text):
+    """Пост подходит, если есть проф-слово И маркер заказа."""
+    low = text.lower()
+    has_kw = any(k in low for k in KEYWORDS)
+    has_order = any(m in low for m in ORDER_MARKERS)
+    return has_kw and has_order
 
 # ========== ПАРСИНГ TELEGRAM ==========
 async def parse_telegram_channel(session, channel_name):
@@ -102,15 +112,13 @@ async def parse_telegram_channel(session, channel_name):
 
             text = text_div.get_text(" ", strip=True)
 
-            if not matches_keywords(text):
+            if not is_order_post(text):
                 continue
 
-            # Ищем ЛЮБОЙ тег time и берём его атрибут datetime
             time_tag = post.find("time")
             date_str = time_tag.get("datetime", "") if time_tag else ""
             age = parse_iso_age_hours(date_str)
 
-            # Ссылка на конкретный пост (если есть)
             link_tag = post.select_one("a.tgme_widget_message_date")
             post_url = link_tag.get("href", "") if link_tag else f"https://t.me/{channel_name}"
 
@@ -130,7 +138,7 @@ async def parse_telegram_channel(session, channel_name):
                 "age_hours": age,
             })
 
-        print(f"   @{channel_name}: найдено {len(tasks)} подходящих заданий")
+        print(f"   @{channel_name}: найдено {len(tasks)} подходящих заказов")
 
     except Exception as e:
         print(f"   @{channel_name}: ошибка {type(e).__name__}")
@@ -138,79 +146,70 @@ async def parse_telegram_channel(session, channel_name):
     return tasks
 
 # ========== ПАРСИНГ FREELANCE.RU ==========
-async def parse_freelance_ru(session):
-    """Парсит задания с freelance.ru"""
-    url = "https://freelance.ru/task"
+async def parse_freelance_ru(session, query):
+    """Парсит задания с freelance.ru по запросу (параметр q)."""
+    url = f"https://freelance.ru/task?q={quote(query)}"
     tasks = []
 
-    print(f"   freelance.ru: загрузка ленты заданий")
+    print(f"   freelance.ru: запрос '{query}'")
 
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=25)) as r:
             if r.status != 200:
-                print(f"   freelance.ru: статус {r.status}")
+                print(f"      статус {r.status}")
                 return []
             html = await r.text()
 
         soup = BeautifulSoup(html, "html.parser")
+        text = soup.get_text("\n")
 
-        all_divs = soup.find_all("div")
+        # Карточки начинаются с маркера "Видно всем"
+        blocks = text.split("Видно всем")[1:]
 
-        for div in all_divs:
-            text = div.get_text(" ", strip=True)
-
-            if "Видно всем" not in text:
-                continue
-            if "Гонорар" not in text:
-                continue
-
-            if not matches_keywords(text):
+        for block in blocks:
+            lines = [l.strip() for l in block.split("\n") if l.strip()]
+            if not lines:
                 continue
 
-            lines = text.split("\n")
-            title = ""
-            description = ""
-            price = "Не указана"
+            title = lines[0]
+
+            # Ищем строку с датой
             date_str = ""
+            date_idx = None
+            for i, l in enumerate(lines):
+                if re.search(r'(только что|\d+\s*минут\w*|минуту|\d+\s*час\w*|час\s+назад|день\s+назад|дня\s+назад|дней\s+назад|вчера)', l):
+                    date_str = l
+                    date_idx = i
+                    break
+            if date_idx is None:
+                continue
 
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
+            # Цена: строка после "Гонорар"
+            price = "Не указана"
+            for i, l in enumerate(lines):
+                if l.startswith("Гонорар") and i + 1 < len(lines):
+                    price = lines[i + 1]
+                    break
 
-                if not title and len(line) > 20 and "Видно всем" not in line:
-                    title = line
-                    continue
+            description = " ".join(lines[1:date_idx])[:300]
+            age = parse_age_hours(date_str)
 
-                if "Гонорар" in line:
-                    price_match = re.search(r'([\d\s]+₽/ заказ|Обсуждается индивидуально)', line)
-                    if price_match:
-                        price = price_match.group(1).strip()
-                    continue
+            print(f"      • [{age} ч назад] {title[:60]} | {price}")
 
-                date_match = re.search(r'(\d+ минут|минуту|часа?|часов|день|дня|дней) назад', line)
-                if date_match:
-                    date_str = date_match.group(0)
-                    continue
+            tasks.append({
+                "source": "freelance.ru",
+                "title": title[:100],
+                "description": description,
+                "price": price,
+                "date_str": date_str,
+                "url": url,
+                "age_hours": age,
+            })
 
-                if title and "Гонорар" not in line and len(line) > 30:
-                    description += " " + line
-
-            if title:
-                tasks.append({
-                    "source": "freelance.ru",
-                    "title": title[:100],
-                    "description": description[:300].strip(),
-                    "price": price,
-                    "date_str": date_str,
-                    "url": "https://freelance.ru/task",
-                    "age_hours": parse_age_hours(date_str),
-                })
-
-        print(f"   freelance.ru: найдено {len(tasks)} подходящих заданий")
+        print(f"      найдено {len(tasks)} заданий")
 
     except Exception as e:
-        print(f"   freelance.ru: ошибка {type(e).__name__}: {e}")
+        print(f"      ошибка {type(e).__name__}: {e}")
 
     return tasks
 
@@ -253,18 +252,21 @@ async def main():
             all_tasks.extend(tasks)
             await asyncio.sleep(2)
 
-        freelance_tasks = await parse_freelance_ru(session)
-        all_tasks.extend(freelance_tasks)
+        for query in FREELANCE_QUERIES:
+            tasks = await parse_freelance_ru(session, query)
+            all_tasks.extend(tasks)
+            await asyncio.sleep(2)
 
-    seen = set()
-    unique = []
+    # Дедупликация: при дублях оставляем САМЫЙ СВЕЖИЙ вариант
+    best = {}
     for task in all_tasks:
         key = make_key(task["title"], task["source"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(task)
+        if key not in best or task["age_hours"] < best[key]["age_hours"]:
+            best[key] = task
+    unique = list(best.values())
 
     fresh = [t for t in unique if t["age_hours"] <= FRESH_HOURS]
+    fresh.sort(key=lambda x: x["age_hours"])
 
     print(f"📊 Всего: {len(unique)}, свежих (≤{FRESH_HOURS}ч): {len(fresh)}")
 
@@ -279,8 +281,6 @@ async def main():
         f"✅ Найдено: {len(fresh)}",
         parse_mode="HTML"
     )
-
-    fresh.sort(key=lambda x: x["age_hours"])
 
     for task in fresh[:MAX_RESULTS]:
         await send_task(chat_id, task)

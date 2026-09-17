@@ -22,8 +22,8 @@ HEADERS = {
 }
 
 # Telegram-каналы: (имя, режим)
-#   kw_and_order — нужно проф-слово И маркер заказа (для каналов со статьями)
-#   kw_only      — достаточно проф-слова (для каналов чисто с заказами)
+#   kw_and_order — роль в заголовке И маркер заказа в тексте
+#   kw_only      — роль в заголовке достаточна
 TG_CHANNELS = [
     ("ba_and_sa", "kw_and_order"),
     ("data_analysis_jobs", "kw_and_order"),
@@ -34,17 +34,14 @@ TG_CHANNELS = [
     ("partnerkin_job", "kw_only"),
 ]
 
-# СТРОГИЕ ключевые слова: только роли из профиля
-KEYWORDS = [
+# РОЛЬ ИЩЕМ ТОЛЬКО В ЗАГОЛОВКЕ (слово «качество» убрано полностью)
+ROLE_IN_TITLE = [
     "аналитик", "bpmn", "бизнес-процесс", "бизнес процесс", "бизнес-анализ",
-    "системный анализ", "методолог", "смк", "сертификац", "регламент",
-    "стандартизац",
-    "менеджер по качеств", "специалист по качеств", "инженер по качеств",
-    "контроль качеств", "управление качеств", "менеджмент качеств",
-    "система менеджмента качеств", "аудит качеств",
+    "системный анализ", "методолог", "смк", "сертификац", "стандартизац",
+    "регламент",
 ]
 
-# Маркеры заказа (точное совпадение слова)
+# Маркеры заказа (точное совпадение слова, ищем во всём тексте)
 ORDER_MARKERS_RE = [
     r"\bищем\b", r"\bищу\b", r"\bтребуется\b", r"\bнужен\b", r"\bнужна\b",
     r"\bваканс\w*", r"\bзаказ\b", r"\bзаказы\b", r"\bгонорар\b", r"\bоплат\w*",
@@ -89,14 +86,16 @@ def make_key(title, source):
     title_norm = re.sub(r'\s+', ' ', title.lower().strip())[:50]
     return (title_norm, source)
 
-def is_order_post(text, mode):
-    low = text.lower()
-    has_kw = any(k in low for k in KEYWORDS)
-    if not has_kw:
+def is_order_post(title, text, mode):
+    """Роль — только в заголовке; маркер заказа — во всём тексте."""
+    low_title = title.lower()
+    has_role = any(k in low_title for k in ROLE_IN_TITLE)
+    if not has_role:
         return False
     if mode == "kw_only":
         return True
-    return any(re.search(m, low) for m in ORDER_MARKERS_RE)
+    low_text = text.lower()
+    return any(re.search(m, low_text) for m in ORDER_MARKERS_RE)
 
 # ========== ПАРСИНГ TELEGRAM ==========
 async def parse_telegram_channel(session, channel_name, mode):
@@ -119,8 +118,11 @@ async def parse_telegram_channel(session, channel_name, mode):
                 continue
 
             text = text_div.get_text(" ", strip=True)
+            title = text[:100].strip()
+            if len(text) > 100:
+                title += "..."
 
-            if not is_order_post(text, mode):
+            if not is_order_post(title, text, mode):
                 continue
 
             time_tag = post.find("time")
@@ -129,10 +131,6 @@ async def parse_telegram_channel(session, channel_name, mode):
 
             link_tag = post.select_one("a.tgme_widget_message_date")
             post_url = link_tag.get("href", "") if link_tag else f"https://t.me/{channel_name}"
-
-            title = text[:100].strip()
-            if len(text) > 100:
-                title += "..."
 
             print(f"      • [{age} ч назад] {title[:60]}")
 
@@ -198,8 +196,7 @@ async def parse_freelance_ru(session, query):
 
             description = " ".join(lines[1:date_idx])[:300]
 
-            full_text = (title + " " + description).lower()
-            if not any(k in full_text for k in KEYWORDS):
+            if not is_order_post(title, title + " " + description, "kw_only"):
                 continue
 
             age = parse_age_hours(date_str)

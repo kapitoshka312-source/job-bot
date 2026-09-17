@@ -22,7 +22,7 @@ HEADERS = {
 }
 
 # Telegram-каналы: (имя, режим)
-#   kw_and_order — роль в заголовке И маркер заказа в тексте
+#   kw_and_order — роль в заголовке И маркер заказа в первых 150 символах
 #   kw_only      — роль в заголовке достаточна
 TG_CHANNELS = [
     ("ba_and_sa", "kw_and_order"),
@@ -41,7 +41,7 @@ ROLE_IN_TITLE = [
     "регламент",
 ]
 
-# Маркеры заказа (точное совпадение слова, ищем во всём тексте)
+# Маркеры заказа (точное совпадение слова)
 ORDER_MARKERS_RE = [
     r"\bищем\b", r"\bищу\b", r"\bтребуется\b", r"\bнужен\b", r"\bнужна\b",
     r"\bваканс\w*", r"\bзаказ\b", r"\bзаказы\b", r"\bгонорар\b", r"\bоплат\w*",
@@ -53,7 +53,7 @@ ORDER_MARKERS_RE = [
 FREELANCE_QUERIES = ["аналитик"]
 
 MAX_RESULTS = 50
-FRESH_HOURS = 24
+FRESH_HOURS = 24    # если слишком тихо — можно поставить 72 (3 суток)
 
 # ========== УТИЛИТЫ ==========
 def parse_age_hours(text):
@@ -87,15 +87,15 @@ def make_key(title, source):
     return (title_norm, source)
 
 def is_order_post(title, text, mode):
-    """Роль — только в заголовке; маркер заказа — во всём тексте."""
+    """Роль — только в заголовке; маркер заказа — в первых 150 символах (или весь текст для kw_only не нужен)."""
     low_title = title.lower()
     has_role = any(k in low_title for k in ROLE_IN_TITLE)
     if not has_role:
         return False
     if mode == "kw_only":
         return True
-    low_text = text.lower()
-    return any(re.search(m, low_text) for m in ORDER_MARKERS_RE)
+    head = text[:150].lower()
+    return any(re.search(m, head) for m in ORDER_MARKERS_RE)
 
 # ========== ПАРСИНГ TELEGRAM ==========
 async def parse_telegram_channel(session, channel_name, mode):

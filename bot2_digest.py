@@ -21,9 +21,8 @@ HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9",
 }
 
-# Telegram-каналы для парсинга (bpmn2ru убран: вебинары, не заказы)
+# Telegram-КАНАЛЫ для парсинга (чат analyst_job убран: у чатов нет веб-превью)
 TG_CHANNELS = [
-    "analyst_job",       # Работа для системных и бизнес-аналитиков
     "ba_and_sa",         # Бизнес и системные аналитики
     "ipomogator",        # Биржа фриланса
     "distantsiya",       # Удалённая работа и фриланс
@@ -163,7 +162,6 @@ async def parse_freelance_ru(session, query):
         soup = BeautifulSoup(html, "html.parser")
         text = soup.get_text("\n")
 
-        # Карточки начинаются с маркера "Видно всем"
         blocks = text.split("Видно всем")[1:]
 
         for block in blocks:
@@ -173,7 +171,6 @@ async def parse_freelance_ru(session, query):
 
             title = lines[0]
 
-            # Ищем строку с датой
             date_str = ""
             date_idx = None
             for i, l in enumerate(lines):
@@ -184,7 +181,6 @@ async def parse_freelance_ru(session, query):
             if date_idx is None:
                 continue
 
-            # Цена: строка после "Гонорар"
             price = "Не указана"
             for i, l in enumerate(lines):
                 if l.startswith("Гонорар") and i + 1 < len(lines):
@@ -192,6 +188,12 @@ async def parse_freelance_ru(session, query):
                     break
 
             description = " ".join(lines[1:date_idx])[:300]
+
+            # Доп. фильтр: в задании должно быть профессиональное слово
+            full_text = (title + " " + description).lower()
+            if not any(k in full_text for k in KEYWORDS):
+                continue
+
             age = parse_age_hours(date_str)
 
             print(f"      • [{age} ч назад] {title[:60]} | {price}")

@@ -26,6 +26,7 @@ HEADERS = {
 #   kw_only      — достаточно проф-слова (для каналов чисто с заказами)
 TG_CHANNELS = [
     ("ba_and_sa", "kw_and_order"),
+    ("data_analysis_jobs", "kw_and_order"),
     ("ipomogator", "kw_only"),
     ("distantsiya", "kw_only"),
     ("frilanser_vacansii", "kw_only"),
@@ -33,13 +34,17 @@ TG_CHANNELS = [
     ("partnerkin_job", "kw_only"),
 ]
 
-# Профессиональные ключевые слова
+# СТРОГИЕ ключевые слова: только роли из профиля
 KEYWORDS = [
-    "аналитик", "bpmn", "бизнес-процесс", "смк", "качеств",
-    "методолог", "регламент", "требован", "документаци", "процесс"
+    "аналитик", "bpmn", "бизнес-процесс", "бизнес процесс", "бизнес-анализ",
+    "системный анализ", "методолог", "смк", "сертификац", "регламент",
+    "стандартизац",
+    "менеджер по качеств", "специалист по качеств", "инженер по качеств",
+    "контроль качеств", "управление качеств", "менеджмент качеств",
+    "система менеджмента качеств", "аудит качеств",
 ]
 
-# Маркеры заказа (точное совпадение слова, чтобы "заказчики" не проходило)
+# Маркеры заказа (точное совпадение слова)
 ORDER_MARKERS_RE = [
     r"\bищем\b", r"\bищу\b", r"\bтребуется\b", r"\bнужен\b", r"\bнужна\b",
     r"\bваканс\w*", r"\bзаказ\b", r"\bзаказы\b", r"\bгонорар\b", r"\bоплат\w*",
@@ -48,7 +53,7 @@ ORDER_MARKERS_RE = [
 ]
 
 # Запросы для freelance.ru
-FREELANCE_QUERIES = ["аналитик", "бизнес-процесс", "методолог"]
+FREELANCE_QUERIES = ["аналитик"]
 
 MAX_RESULTS = 50
 FRESH_HOURS = 24
@@ -168,14 +173,12 @@ async def parse_freelance_ru(session, query):
         blocks = text.split("Видно всем")[1:]
         print(f"      блоков карточек: {len(blocks)}")
 
-        for n, block in enumerate(blocks):
+        for block in blocks:
             lines = [l.strip() for l in block.split("\n") if l.strip()]
             if not lines:
                 continue
 
             title = lines[0]
-            if n < 3:
-                print(f"      заголовок #{n+1}: {title[:60]}")
 
             date_str = ""
             date_idx = None

@@ -21,118 +21,197 @@ HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9",
 }
 
-QUERIES = ["бизнес-аналитик", "менеджер по качеству", "системный аналитик"]
-MAX_PER_QUERY = 50
+# Telegram-каналы для парсинга
+TG_CHANNELS = [
+    "bpmn2ru",           # BPM, бизнес-процессы
+    "analyst_job",       # Работа для системных и бизнес-аналитиков
+    "ba_and_sa",         # Бизнес и системные аналитики
+    "ipomogator",        # Биржа фриланса
+    "distantsiya",       # Удалённая работа и фриланс
+]
+
+# Ключевые слова для фильтрации
+KEYWORDS = [
+    "аналитик", "bpmn", "бизнес-процесс", "смк", "качеств",
+    "методолог", "подработк", "разов", "проект", "фриланс",
+    "регламент", "процесс", "требован", "документаци"
+]
+
+MAX_RESULTS = 50
 
 # ========== УТИЛИТЫ ==========
 def parse_age_hours(text):
+    """Парсит возраст из текста типа '44 минуты назад', '5 часов назад', 'день назад'."""
     text = text.lower()
-    if "сегодня" in text:
+    if "сегодня" in text or "минут" in text:
         return 0
     match = re.search(r'(\d+)\s*час', text)
     if match:
         return int(match.group(1))
-    match = re.search(r'(\d+)\s*мин', text)
-    if match:
-        return 0
+    if "день назад" in text or "дня назад" in text:
+        return 24
+    if "вчера" in text:
+        return 24
     return 999
 
-def make_key(title, company):
-    title_norm = re.sub(r'\s+', ' ', title.lower().strip())[:40]
-    company_norm = company.lower().strip()[:30]
-    return (title_norm, company_norm)
+def make_key(title, source):
+    """Ключ для дедупликации."""
+    title_norm = re.sub(r'\s+', ' ', title.lower().strip())[:50]
+    return (title_norm, source)
 
-# ========== ПАРСИНГ GORODRABOT ==========
-async def search_gorodrabot(query: str):
-    encoded_query = quote(query.replace(' ', '_'))
-    url = f"https://sankt-peterburg.gorodrabot.ru/{encoded_query}"
-    print(f"🔍 ГородРабот: {query}")
-    print(f"   URL: {url}")
+def matches_keywords(text):
+    """Проверяет, есть ли ключевые слова в тексте."""
+    text_lower = text.lower()
+    return any(kw in text_lower for kw in KEYWORDS)
+
+# ========== ПАРСИНГ TELEGRAM ==========
+async def parse_telegram_channel(session, channel_name):
+    """Парсит посты из Telegram-канала через t.me/s/"""
+    url = f"https://t.me/s/{channel_name}"
+    tasks = []
     
-    all_vacancies = []
-    page = 1
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=25)) as r:
+            if r.status != 200:
+                print(f"   @{channel_name}: статус {r.status}")
+                return []
+            html = await r.text()
+        
+        soup = BeautifulSoup(html, "html.parser")
+        posts = soup.select("div.tgme_widget_message")
+        
+        for post in posts:
+            text_div = post.select_one("div.tgme_widget_message_text")
+            if not text_div:
+                continue
+            
+            text = text_div.get_text(" ", strip=True)
+            
+            if not matches_keywords(text):
+                continue
+            
+            time_tag = post.select_one("time.datetime")
+            date_str = time_tag.get("datetime", "") if time_tag else ""
+            
+            post_url = f"https://t.me/{channel_name}"
+            
+            title = text[:100].strip()
+            if len(text) > 100:
+                title += "..."
+            
+            tasks.append({
+                "source": f"TG @{channel_name}",
+                "title": title,
+                "description": text[:300],
+                "price": "Не указана",
+                "date_str": date_str,
+                "url": post_url,
+                "age_hours": parse_age_hours(date_str) if date_str else 999,
+            })
+        
+        print(f"   @{channel_name}: найдено {len(tasks)} подходящих заданий")
+        
+    except Exception as e:
+        print(f"   @{channel_name}: ошибка {type(e).__name__}")
     
-    async with aiohttp.ClientSession(headers=HEADERS, timeout=aiohttp.ClientTimeout(total=25)) as s:
-        while page <= 3:
-            params = {"page": str(page)} if page > 1 else {}
+    return tasks
+
+# ========== ПАРСИНГ FREELANCE.RU ==========
+async def parse_freelance_ru(session):
+    """Парсит задания с freelance.ru"""
+    url = "https://freelance.ru/task"
+    tasks = []
+    
+    print(f"   freelance.ru: загрузка ленты заданий")
+    
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=25)) as r:
+            if r.status != 200:
+                print(f"   freelance.ru: статус {r.status}")
+                return []
+            html = await r.text()
+        
+        soup = BeautifulSoup(html, "html.parser")
+        
+        all_divs = soup.find_all("div")
+        
+        for div in all_divs:
+            text = div.get_text(" ", strip=True)
             
-            # Задержка перед запросом
-            if page > 1:
-                print(f"   Пауза 15 секунд...")
-                await asyncio.sleep(15)
+            if "Видно всем" not in text:
+                continue
+            if "Гонорар" not in text:
+                continue
             
-            async with s.get(url, params=params) as r:
-                print(f"   Страница {page}: статус {r.status}")
-                if r.status != 200:
-                    print(f"   Ошибка: статус {r.status}")
-                    break
-                html = await r.text()
+            if not matches_keywords(text):
+                continue
             
-            soup = BeautifulSoup(html, "html.parser")
-            cards = soup.select("div.snippet__body")
-            print(f"   Найдено карточек: {len(cards)}")
+            lines = text.split("\n")
+            title = ""
+            description = ""
+            price = "Не указана"
+            date_str = ""
             
-            if not cards:
-                break
-            
-            for card in cards:
-                title_tag = card.select_one("h2.snippet__title a")
-                if not title_tag:
+            for line in lines:
+                line = line.strip()
+                if not line:
                     continue
                 
-                title = title_tag.get_text(strip=True)
-                href = title_tag.get("href", "")
-                if href and not href.startswith("http"):
-                    href = "https://gorodrabot.ru" + href
+                if not title and len(line) > 20 and "Видно всем" not in line:
+                    title = line
+                    continue
                 
-                salary_tag = card.select_one("span.snippet__salary")
-                salary = salary_tag.get_text(strip=True).replace('\n', ' ') if salary_tag else "Не указана"
+                if "Гонорар" in line:
+                    price_match = re.search(r'([\d\s]+₽/ заказ|Обсуждается индивидуально)', line)
+                    if price_match:
+                        price = price_match.group(1).strip()
+                    continue
                 
-                company_tag = card.select_one("li.snippet__meta-item_company span.snippet__meta-value")
-                company = company_tag.get_text(strip=True) if company_tag else "Не указано"
+                date_match = re.search(r'(\d+ минут|минуту|часа?|часов|день|дня|дней) назад', line)
+                if date_match:
+                    date_str = date_match.group(0)
+                    continue
                 
-                city_tag = card.select_one("li.snippet__meta-item_location span.snippet__meta-value")
-                city = city_tag.get_text(strip=True) if city_tag else "Не указан"
-                
-                parent = card.find_parent("div", class_="snippet__inner") or card
-                age_text = parent.get_text(" ", strip=True)
-                age_hours = parse_age_hours(age_text)
-                
-                all_vacancies.append({
-                    "source": "ГородРабот",
-                    "title": title,
-                    "company": company,
-                    "salary": salary,
-                    "city": city,
-                    "age_hours": age_hours,
-                    "url": href,
-                })
+                if title and "Гонорар" not in line and len(line) > 30:
+                    description += " " + line
             
-            page += 1
+            if title:
+                tasks.append({
+                    "source": "freelance.ru",
+                    "title": title[:100],
+                    "description": description[:300].strip(),
+                    "price": price,
+                    "date_str": date_str,
+                    "url": "https://freelance.ru/task",
+                    "age_hours": parse_age_hours(date_str),
+                })
+        
+        print(f"   freelance.ru: найдено {len(tasks)} подходящих заданий")
+        
+    except Exception as e:
+        print(f"   freelance.ru: ошибка {type(e).__name__}: {e}")
     
-    print(f"🃏 ГородРабот: всего {len(all_vacancies)} вакансий")
-    return all_vacancies
+    return tasks
 
-async def search_getmatch(query: str):
-    print(f"⏭️ GetMatch: пропущен (требуется Playwright)")
-    return []
-
-async def send_vacancy(chat_id, job, query):
-    age_text = "сегодня" if job["age_hours"] == 0 else f"{job['age_hours']} ч. назад"
+# ========== ОТПРАВКА ЗАДАНИЙ ==========
+async def send_task(chat_id, task):
+    """Отправляет одно задание."""
+    age_text = "сегодня" if task["age_hours"] <= 1 else f"{task['age_hours']} ч. назад"
     
     text = (
-        f"<i>[{job['source']}]</i>\n"
-        f"💼 <b>{job['title']}</b>\n"
-        f"🏢 {job['company']}\n"
-        f"💰 {job['salary']}\n"
-        f"📅 {age_text}\n"
+        f"<i>[{task['source']}]</i>\n"
+        f"💼 <b>{task['title']}</b>\n"
+        f"💰 {task['price']}\n"
+        f"📅 {age_text}\n\n"
+        f"{task['description']}\n"
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔗 Открыть вакансию", url=job["url"])]
+        [InlineKeyboardButton(text="🔗 Открыть задание", url=task["url"])]
     ])
     await bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
 
+# ========== ОСНОВНАЯ ЛОГИКА ==========
 async def main():
     if not BOT_TOKEN:
         print("❌ Не задан BOT2_TOKEN")
@@ -143,44 +222,48 @@ async def main():
     
     chat_id = int(CHAT_ID)
     
-    print(f"📨 Дайджест Бот-2 запущен")
+    print(f"📨 Дайджест подработок запущен")
     
-    for query in QUERIES:
-        results = []
-        for fn in (search_gorodrabot, search_getmatch):
-            r = await fn(query)
-            results.extend(r)
+    all_tasks = []
+    
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
+        for channel in TG_CHANNELS:
+            tasks = await parse_telegram_channel(session, channel)
+            all_tasks.extend(tasks)
+            await asyncio.sleep(2)
         
-        seen = set()
-        unique = []
-        for v in results:
-            key = make_key(v["title"], v["company"])
-            if key not in seen:
-                seen.add(key)
-                unique.append(v)
-        
-        fresh = [v for v in unique if v["age_hours"] <= 24]
-        
-        print(f"📊 '{query}': всего {len(unique)}, свежих (≤24ч): {len(fresh)}")
-        
-        if not fresh:
-            continue
-        
-        await bot.send_message(
-            chat_id,
-            f"🔎 <b>{query.title()}</b>\n"
-            f"📅 Свежесть: 24 часа\n"
-            f"📍 Город: Санкт-Петербург\n"
-            f"✅ Найдено: {len(fresh)}",
-            parse_mode="HTML"
-        )
-        
-        for job in fresh[:MAX_PER_QUERY]:
-            await send_vacancy(chat_id, job, query)
-        
-        # Пауза между запросами
-        print("   Пауза 15 секунд перед следующим запросом...")
-        await asyncio.sleep(15)
+        freelance_tasks = await parse_freelance_ru(session)
+        all_tasks.extend(freelance_tasks)
+    
+    seen = set()
+    unique = []
+    for task in all_tasks:
+        key = make_key(task["title"], task["source"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(task)
+    
+    fresh = [t for t in unique if t["age_hours"] <= 24]
+    
+    print(f"📊 Всего: {len(unique)}, свежих (≤24ч): {len(fresh)}")
+    
+    if not fresh:
+        print("😴 Свежих заданий не найдено")
+        return
+    
+    await bot.send_message(
+        chat_id,
+        f"🔍 <b>Подработка и разовые заказы</b>\n"
+        f"📅 Свежесть: 24 часа\n"
+        f"✅ Найдено: {len(fresh)}",
+        parse_mode="HTML"
+    )
+    
+    fresh.sort(key=lambda x: x["age_hours"])
+    
+    for task in fresh[:MAX_RESULTS]:
+        await send_task(chat_id, task)
+        await asyncio.sleep(0.5)
     
     print("✅ Дайджест завершён")
 

@@ -38,6 +38,7 @@ KEYWORDS = [
 ]
 
 MAX_RESULTS = 50
+FRESH_HOURS = 24    # окно свежести в часах (можно поднять до 72, если каналы постят редко)
 
 # ========== УТИЛИТЫ ==========
 def parse_age_hours(text):
@@ -104,14 +105,20 @@ async def parse_telegram_channel(session, channel_name):
             if not matches_keywords(text):
                 continue
 
-            time_tag = post.select_one("time.datetime")
+            # Ищем ЛЮБОЙ тег time и берём его атрибут datetime
+            time_tag = post.find("time")
             date_str = time_tag.get("datetime", "") if time_tag else ""
+            age = parse_iso_age_hours(date_str)
 
-            post_url = f"https://t.me/{channel_name}"
+            # Ссылка на конкретный пост (если есть)
+            link_tag = post.select_one("a.tgme_widget_message_date")
+            post_url = link_tag.get("href", "") if link_tag else f"https://t.me/{channel_name}"
 
             title = text[:100].strip()
             if len(text) > 100:
                 title += "..."
+
+            print(f"      • [{age} ч назад] {title[:60]}")
 
             tasks.append({
                 "source": f"TG @{channel_name}",
@@ -120,7 +127,7 @@ async def parse_telegram_channel(session, channel_name):
                 "price": "Не указана",
                 "date_str": date_str,
                 "url": post_url,
-                "age_hours": parse_iso_age_hours(date_str),
+                "age_hours": age,
             })
 
         print(f"   @{channel_name}: найдено {len(tasks)} подходящих заданий")
@@ -257,9 +264,9 @@ async def main():
             seen.add(key)
             unique.append(task)
 
-    fresh = [t for t in unique if t["age_hours"] <= 24]
+    fresh = [t for t in unique if t["age_hours"] <= FRESH_HOURS]
 
-    print(f"📊 Всего: {len(unique)}, свежих (≤24ч): {len(fresh)}")
+    print(f"📊 Всего: {len(unique)}, свежих (≤{FRESH_HOURS}ч): {len(fresh)}")
 
     if not fresh:
         print("😴 Свежих заданий не найдено")
@@ -268,7 +275,7 @@ async def main():
     await bot.send_message(
         chat_id,
         f"🔍 <b>Подработка и разовые заказы</b>\n"
-        f"📅 Свежесть: 24 часа\n"
+        f"📅 Свежесть: {FRESH_HOURS} часа\n"
         f"✅ Найдено: {len(fresh)}",
         parse_mode="HTML"
     )

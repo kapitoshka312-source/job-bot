@@ -21,11 +21,16 @@ HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9",
 }
 
-# Telegram-КАНАЛЫ для парсинга (чат analyst_job убран: у чатов нет веб-превью)
+# Telegram-каналы: (имя, режим)
+#   kw_and_order — нужно проф-слово И маркер заказа (для каналов со статьями)
+#   kw_only      — достаточно проф-слова (для каналов чисто с заказами)
 TG_CHANNELS = [
-    "ba_and_sa",         # Бизнес и системные аналитики
-    "ipomogator",        # Биржа фриланса
-    "distantsiya",       # Удалённая работа и фриланс
+    ("ba_and_sa", "kw_and_order"),
+    ("ipomogator", "kw_only"),
+    ("distantsiya", "kw_only"),
+    ("frilanser_vacansii", "kw_only"),
+    ("workzavr", "kw_only"),
+    ("partnerkin_job", "kw_only"),
 ]
 
 # Профессиональные ключевые слова
@@ -34,11 +39,12 @@ KEYWORDS = [
     "методолог", "регламент", "требован", "документаци", "процесс"
 ]
 
-# Маркеры того, что пост — это заказ/вакансия, а не статья
-ORDER_MARKERS = [
-    "ищем", "ищу", "требуется", "нужен", "ваканс", "заказ",
-    "гонорар", "оплат", "подработ", "разов", "фриланс",
-    "проектн", "стажиров", "найм", "возьмусь", "готов выполнить"
+# Маркеры заказа (точное совпадение слова, чтобы "заказчики" не проходило)
+ORDER_MARKERS_RE = [
+    r"\bищем\b", r"\bищу\b", r"\bтребуется\b", r"\bнужен\b", r"\bнужна\b",
+    r"\bваканс\w*", r"\bзаказ\b", r"\bзаказы\b", r"\bгонорар\b", r"\bоплат\w*",
+    r"\bподработ\w*", r"\bразов\w*", r"\bфриланс\w*", r"\bпроектн\w*",
+    r"\bстажиров\w*", r"\bнайм\b", r"\bвозьмусь\b", r"\bготов\s+выполнить\b"
 ]
 
 # Запросы для freelance.ru
@@ -49,7 +55,6 @@ FRESH_HOURS = 24
 
 # ========== УТИЛИТЫ ==========
 def parse_age_hours(text):
-    """Парсит возраст из текста типа '44 минуты назад', '5 часов назад', 'день назад'."""
     text = text.lower()
     if "сегодня" in text or "только что" in text or "минут" in text:
         return 0
@@ -63,7 +68,6 @@ def parse_age_hours(text):
     return 999
 
 def parse_iso_age_hours(iso_date):
-    """Считает возраст в часах из ISO-даты Telegram: '2026-09-17T10:30:00+00:00'."""
     if not iso_date:
         return 999
     try:
@@ -77,20 +81,20 @@ def parse_iso_age_hours(iso_date):
         return 999
 
 def make_key(title, source):
-    """Ключ для дедупликации."""
     title_norm = re.sub(r'\s+', ' ', title.lower().strip())[:50]
     return (title_norm, source)
 
-def is_order_post(text):
-    """Пост подходит, если есть проф-слово И маркер заказа."""
+def is_order_post(text, mode):
     low = text.lower()
     has_kw = any(k in low for k in KEYWORDS)
-    has_order = any(m in low for m in ORDER_MARKERS)
-    return has_kw and has_order
+    if not has_kw:
+        return False
+    if mode == "kw_only":
+        return True
+    return any(re.search(m, low) for m in ORDER_MARKERS_RE)
 
 # ========== ПАРСИНГ TELEGRAM ==========
-async def parse_telegram_channel(session, channel_name):
-    """Парсит посты из Telegram-канала через t.me/s/"""
+async def parse_telegram_channel(session, channel_name, mode):
     url = f"https://t.me/s/{channel_name}"
     tasks = []
 
@@ -111,7 +115,7 @@ async def parse_telegram_channel(session, channel_name):
 
             text = text_div.get_text(" ", strip=True)
 
-            if not is_order_post(text):
+            if not is_order_post(text, mode):
                 continue
 
             time_tag = post.find("time")
@@ -146,7 +150,6 @@ async def parse_telegram_channel(session, channel_name):
 
 # ========== ПАРСИНГ FREELANCE.RU ==========
 async def parse_freelance_ru(session, query):
-    """Парсит задания с freelance.ru по запросу (параметр q)."""
     url = f"https://freelance.ru/task?q={quote(query)}"
     tasks = []
 
@@ -163,13 +166,16 @@ async def parse_freelance_ru(session, query):
         text = soup.get_text("\n")
 
         blocks = text.split("Видно всем")[1:]
+        print(f"      блоков карточек: {len(blocks)}")
 
-        for block in blocks:
+        for n, block in enumerate(blocks):
             lines = [l.strip() for l in block.split("\n") if l.strip()]
             if not lines:
                 continue
 
             title = lines[0]
+            if n < 3:
+                print(f"      заголовок #{n+1}: {title[:60]}")
 
             date_str = ""
             date_idx = None
@@ -189,7 +195,6 @@ async def parse_freelance_ru(session, query):
 
             description = " ".join(lines[1:date_idx])[:300]
 
-            # Доп. фильтр: в задании должно быть профессиональное слово
             full_text = (title + " " + description).lower()
             if not any(k in full_text for k in KEYWORDS):
                 continue
@@ -217,7 +222,6 @@ async def parse_freelance_ru(session, query):
 
 # ========== ОТПРАВКА ЗАДАНИЙ ==========
 async def send_task(chat_id, task):
-    """Отправляет одно задание."""
     age_text = "сегодня" if task["age_hours"] <= 1 else f"{task['age_hours']} ч. назад"
 
     text = (
@@ -249,8 +253,8 @@ async def main():
     all_tasks = []
 
     async with aiohttp.ClientSession(headers=HEADERS) as session:
-        for channel in TG_CHANNELS:
-            tasks = await parse_telegram_channel(session, channel)
+        for channel, mode in TG_CHANNELS:
+            tasks = await parse_telegram_channel(session, channel, mode)
             all_tasks.extend(tasks)
             await asyncio.sleep(2)
 
@@ -259,7 +263,6 @@ async def main():
             all_tasks.extend(tasks)
             await asyncio.sleep(2)
 
-    # Дедупликация: при дублях оставляем САМЫЙ СВЕЖИЙ вариант
     best = {}
     for task in all_tasks:
         key = make_key(task["title"], task["source"])
